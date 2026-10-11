@@ -105,6 +105,30 @@ function remoteBackend(filename: string) {
     };
 }
 
+describe('local conflict settings', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it.each([
+        [{}, 'copy'],
+        [{ localConflictMode: 'overwrite' }, 'overwrite'],
+        [{ localConflictMode: 'merge' }, 'copy'],
+    ])('uses copy for missing or unsupported modes and preserves explicit overwrite', async (saved, expected) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { plugin } = await makePlugin();
+        Object.assign(plugin, { loadData: vi.fn().mockResolvedValue({ deviceId: 'desktop', ...saved }) });
+        await plugin.loadSettings();
+        expect(plugin.settings.localConflictMode).toBe(expected);
+    });
+
+    it('wires the current setting to the installed adapter without reinstalling', async () => {
+        const { plugin } = await makePlugin();
+        (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+        expect(plugin.virtualAdapter?.getConflictMode?.()).toBe('copy');
+        plugin.settings.localConflictMode = 'overwrite';
+        expect(plugin.virtualAdapter?.getConflictMode?.()).toBe('overwrite');
+    });
+});
+
 async function makePlugin(mounts: MountPoint[] = [], source = '', fallback = '') {
     const files = new Map<string, TFile | TFolder>();
     const events: string[] = [];
@@ -486,6 +510,8 @@ describe('main fallback regressions', () => {
         vi.mocked(checkPathAccessible).mockImplementation(path => path === '/missing'
             ? probe.promise : Promise.resolve({ accessible: true, readOnly: false }));
         const refresh = plugin.notifyVaultMountAdded(existing);
+        vi.mocked(fs.readFile).mockResolvedValue(Buffer.from(''));
+        vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
         try {
             await adapter.write('docs/note.md', 'saved during refresh');
             expect(fs.writeFile).toHaveBeenCalledWith('/active-root/note.md', 'saved during refresh', 'utf8');
@@ -507,6 +533,8 @@ describe('main fallback regressions', () => {
         vi.mocked(checkPathAccessible).mockImplementation(path => path === '/active-root'
             ? probe.promise : Promise.resolve({ accessible: false, readOnly: false }));
         const refresh = plugin.notifyVaultMountAdded(existing);
+        vi.mocked(fs.readFile).mockResolvedValue(Buffer.from(''));
+        vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
         try {
             await vi.waitFor(() => expect(checkPathAccessible).toHaveBeenCalledWith('/active-root'));
             await adapter.write('docs/note.md', 'saved during fallback probe');
@@ -1024,6 +1052,30 @@ describe('main fallback regressions', () => {
         probe.resolve({ accessible: false, readOnly: false });
         await Promise.all([first, second]);
         expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/latest-root');
+    });
+});
+
+describe('mounted creation fallback error propagation', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it.each(['text', 'binary'] as const)('does not register a file after a failed %s fallback write', async kind => {
+        const { plugin, app, files } = await makePlugin([mount('docs')]);
+        Object.assign(app.vault, {
+            create: vi.fn().mockRejectedValue(new Error('Native create unavailable')),
+            createBinary: vi.fn().mockRejectedValue(new Error('Native create unavailable')),
+        });
+        (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+        const stat = vi.spyOn(app.vault.adapter, 'stat');
+        const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+        if (kind === 'text') {
+            vi.spyOn(app.vault.adapter, 'write').mockRejectedValue(error);
+            await expect(app.vault.create('docs/new.md', 'new')).rejects.toBe(error);
+        } else {
+            vi.spyOn(app.vault.adapter, 'writeBinary').mockRejectedValue(error);
+            await expect(app.vault.createBinary('docs/new.md', new Uint8Array([1]).buffer)).rejects.toBe(error);
+        }
+        expect(files.has('docs/new.md')).toBe(false);
+        expect(stat).not.toHaveBeenCalled();
     });
 });
 

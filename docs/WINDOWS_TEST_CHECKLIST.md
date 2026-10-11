@@ -8,6 +8,55 @@ work, plus the combined S3 prefix and copy-source fixes (#57/#68).
 It does not include every open issue or complete security/native hardening.
 Published rc.4 and stable 2.15.4 are unchanged.
 
+### Additional Save-Safety Branch Checks
+
+These checks require the newer `stabilization/save-safety-sequence` bundle.
+The earlier installed local rc.5 bundle does **not** contain these fixes.
+Do not claim a pass until the installation report identifies the newer bundle.
+
+- [ ] SFTP: approve an independently verified test-server key, open and save a
+  disposable note, and reconnect. Capture any first encrypted-packet error.
+  The automated production-bundle test covers AES-GCM and CTR; native Windows
+  success still needs to be recorded.
+- [ ] Create: with watcher events suppressed, place `collision.md` on the
+  source drive outside Obsidian, then create that name in Obsidian. Creation
+  must fail without changing the original bytes. Repeat with a binary file.
+- [ ] Encoding: open copied Windows-1252, UTF-16LE and UTF-16BE notes. Characters
+  should be readable, but save/append must refuse and leave bytes unchanged.
+  Convert a copied note to UTF-8 externally, reopen it, and verify saving works.
+- [ ] Save recovery: on a disposable local/SMB mount, overwrite a non-empty
+  note normally. The source is updated in place and no completed temporary
+  copy remains under `.trash/folderbridge-saving/`.
+- [ ] Backup refusal: temporarily deny access to the disposable vault's
+  `.trash/folderbridge-saving/`, then save an existing non-empty text/binary
+  file. The save must report refusal and leave source bytes unchanged.
+  Restore access immediately afterward.
+- [ ] Failed write recovery: on a controlled disposable share, fail a write
+  after backup creation. The error must identify a recovery file containing
+  the entire old version. Copy it back manually only after stopping writers.
+- [ ] Verify creation, ordinary save and `vault.process` behavior with the
+  third-party plugins you normally use. Record errors rather than dismissing
+  them; no native compatibility result is implied by passing unit tests.
+- [ ] Conflict default: read a copied note in Obsidian, then modify it in a
+  second program with watcher events suppressed. Save your Obsidian draft.
+  Your draft should be saved and the other version retained under
+  `.trash/folderbridge-conflicts/conflict-<unique>/<original-name>`, with a
+  notice giving the path. There must be no automatic merge or editor reload.
+- [ ] Repeat conflict saving with equal-length external edits and binary
+  files. Open a retained copy and verify its exact bytes, not just its name.
+- [ ] Save twice quickly without external edits; no conflict copy should be
+  generated from the plugin's own previous save. A first save without a read
+  baseline may conservatively generate a copy.
+- [ ] Deny access to the disposable conflict-copy folder and repeat a conflict
+  save. It must refuse and leave the external version unchanged.
+- [ ] Only on disposable data, choose **Overwrite without a conflict copy**
+  under **Changes on the drive before saving**. Confirm no retained conflict
+  copy is made, but a failed required temporary safety copy still refuses
+  the save. Restore the recommended copy mode afterward.
+- [ ] Keep both drafts after any disagreement, pause writers and restore
+  manually. Conflict copies are retained, not auto-cleaned; these checks do
+  not prove atomic exclusion of concurrent SMB/external writers.
+
 Record the installed bundle SHA-256 and backup directory from the local
 installation report. Version alone is not enough to identify an unpublished
 build. After restarting Obsidian, confirm Folder Bridge shows `2.15.5-rc.5`.

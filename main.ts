@@ -76,6 +76,20 @@ const BUY_ME_COFFEE_URL = 'https://buymeacoffee.com/tescolopio';
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The adapter refused to create a file because one already exists on the drive. */
+function isAlreadyExistsError(e: unknown): boolean {
+	return (e as NodeJS.ErrnoException | null)?.code === 'EEXIST';
+}
+
+/** Byte-for-byte equality without Node's Buffer (also loads on mobile). */
+function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
+	if (a.byteLength !== b.byteLength) return false;
+	const x = new Uint8Array(a);
+	const y = new Uint8Array(b);
+	for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+	return true;
+}
+
 function generateId(): string {
 	return Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
 }
@@ -1859,6 +1873,13 @@ export default class FolderBridgePlugin extends Plugin {
 				await vault.onChange(existing instanceof TFolder ? 'folder-removed' : 'file-removed', normalizedPath, null, null);
 			}
 		);
+		// Lets the adapter tell a create (a path Obsidian doesn't know) from a
+		// save, so creating a note never replaces an existing file on a mount.
+		this.virtualAdapter.getKnownMtime = (normalizedPath: string) => {
+			const file = this.app.vault.getAbstractFileByPath(normalizedPath);
+			return file instanceof TFile ? file.stat.mtime : undefined;
+		};
+		this.virtualAdapter.getConflictMode = () => this.settings.localConflictMode;
 
 		// Wrap with a Proxy so that any undocumented methods on the original
 		// adapter (internal Obsidian APIs) still work transparently.
@@ -1986,6 +2007,9 @@ export default class FolderBridgePlugin extends Plugin {
 			try {
 				await (this.originalVaultCreate as OrigVaultCreate)(path, data, options);
 			} catch (e) {
+				// A file with this name already exists on the drive: the adapter
+				// refused to replace it, and so does Obsidian for a normal vault.
+				if (isAlreadyExistsError(e)) throw e;
 				// Original vault.create() might reject due to a failed filesystem check
 				// against the vault physical directory (the real file is in the mount).
 				// We swallow the error and fall through to manual registration.
@@ -2002,8 +2026,11 @@ export default class FolderBridgePlugin extends Plugin {
 			// native FS watcher (which never fires for paths outside the vault dir).
 			try {
 				await vault.adapter.write(nPath, data, options as DataWriteOptions | undefined);
-			} catch {
+			} catch (e) {
 				// File may already have been written by the failed vault.create() above.
+				// If what's there is NOT this content, it's someone else's file.
+				if (!isAlreadyExistsError(e)) throw e;
+				if (isAlreadyExistsError(e) && (await vault.adapter.read(nPath).catch(() => null)) !== data) throw e;
 			}
 			const stat = await vault.adapter.stat(nPath);
 			if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(nPath)) {
@@ -2022,6 +2049,7 @@ export default class FolderBridgePlugin extends Plugin {
 			try {
 				await (this.originalVaultCreateBinary as OrigVaultCreateBinary)(path, data, options);
 			} catch (e) {
+				if (isAlreadyExistsError(e)) throw e;
 				logger.debug('[Folder Bridge] vault.createBinary() rejected for virtual path, using manual registration:', e);
 			}
 
@@ -2031,8 +2059,14 @@ export default class FolderBridgePlugin extends Plugin {
 
 			try {
 				await vault.adapter.writeBinary(nPath, data, options as DataWriteOptions | undefined);
-			} catch {
+			} catch (e) {
 				// File may already have been written by the failed vault.createBinary().
+				// If what's there is NOT this content, it's someone else's file.
+				if (!isAlreadyExistsError(e)) throw e;
+				if (isAlreadyExistsError(e)) {
+					const onDisk = await vault.adapter.readBinary(nPath).catch(() => null);
+					if (!onDisk || !sameBytes(onDisk, data)) throw e;
+				}
 			}
 			const stat = await vault.adapter.stat(nPath);
 			if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(nPath)) {
@@ -2983,6 +3017,10 @@ export default class FolderBridgePlugin extends Plugin {
 	async loadSettings() {
 		const data = await this.loadData() as Record<string, unknown>;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+		if (this.settings.localConflictMode !== 'copy' && this.settings.localConflictMode !== 'overwrite') {
+			logger.warn('[FolderBridge] Unsupported local conflict mode; using recovery copies instead of automatic merging or overwrite.');
+			this.settings.localConflictMode = 'copy';
+		}
 		this.settings.managedTocSource = this.settings.managedTocSource ?? '';
 		this.settings.managedTocSourceFallback = this.settings.managedTocSourceFallback ?? '';
 		this.settings.explorerExpansionState = {
@@ -3199,6 +3237,19 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 							.setButtonText(`☕ Buy ${buyMe}`)
 							.setTooltip('Support development with a coffee')
 							.onClick(() => openExternalUrl(BUY_ME_COFFEE_URL)));
+				}));
+
+		new Setting(containerEl)
+			.setName('Changes on the drive before saving')
+			.setDesc('For local mounts, keep a conflict copy in the vault trash before saving over changed or unverified content. Automatic merging is not available. Temporary save-recovery copies are required in either mode.')
+			.addDropdown(dropdown => dropdown
+				.addOption('copy', 'Keep a conflict copy (recommended)')
+				.addOption('overwrite', 'Overwrite without a conflict copy')
+				.setValue(this.plugin.settings.localConflictMode)
+				.onChange(value => {
+					if (value !== 'copy' && value !== 'overwrite') throw new Error(`Unsupported local conflict mode: ${value}`);
+					this.plugin.settings.localConflictMode = value;
+					void this.plugin.saveSettings();
 				}));
 
 		// ── Ignore Lists ─────────────────────────────────────────────────
