@@ -1027,6 +1027,30 @@ describe('main fallback regressions', () => {
     });
 });
 
+describe('mounted creation fallback error propagation', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it.each(['text', 'binary'] as const)('does not register a file after a failed %s fallback write', async kind => {
+        const { plugin, app, files } = await makePlugin([mount('docs')]);
+        Object.assign(app.vault, {
+            create: vi.fn().mockRejectedValue(new Error('Native create unavailable')),
+            createBinary: vi.fn().mockRejectedValue(new Error('Native create unavailable')),
+        });
+        (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+        const stat = vi.spyOn(app.vault.adapter, 'stat');
+        const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+        if (kind === 'text') {
+            vi.spyOn(app.vault.adapter, 'write').mockRejectedValue(error);
+            await expect(app.vault.create('docs/new.md', 'new')).rejects.toBe(error);
+        } else {
+            vi.spyOn(app.vault.adapter, 'writeBinary').mockRejectedValue(error);
+            await expect(app.vault.createBinary('docs/new.md', new Uint8Array([1]).buffer)).rejects.toBe(error);
+        }
+        expect(files.has('docs/new.md')).toBe(false);
+        expect(stat).not.toHaveBeenCalled();
+    });
+});
+
 describe('SFTP host-key trust persistence', () => {
     afterEach(() => vi.restoreAllMocks());
 
