@@ -49,6 +49,13 @@ Fill in once per test machine or device and refer to it by its label.
 | 11 | External edit then in-app save preserves external changes (body, headings, frontmatter, Outline) | #47 | | Not run | |
 | 12 | Suppressed mount after restart: children appear, later external edits stay muted, other plugins behave | #16 | | Not run | |
 | 13 | Desktop WebDAV regression: an existing WebDAV mount still connects, lists and opens a note after the lazy `webdav` load | #66 | | Not run | |
+| 14 | Local/vault trash: restore file and folder, duplicate names, same/cross-volume recovery, failed system-trash fallback, root confirmation | #61 / #59 | | Not run | |
+| 15 | WebDAV/S3/SFTP: both trash modes refuse deletion; explicitly permanent deletion still works on disposable data | #61 | | Not run | |
+| 16 | Unsafe device override: warning, safe effective route, preserved stored settings, reload and TOC refresh | #63 / #70 | | Not run | |
+| 17 | Sanitized mount move: context action and explorer drag retain raw overrides after settings/managed-TOC reload, with safe routing | #73 / #74 | | Not run | |
+| 18 | Remote root trash: only cancel/unmount offered even with "Don't ask again"; cancel leaves confirmation preference unchanged; permanent-delete dialog remains available | #73 / #74 | | Not run | |
+| 19 | rc.4 SFTP trust: independently compare first fingerprint; wait at least 30 seconds before approval; approve/cancel and reconnect; restart, changed-key refusal, host/port edits and explicit reset | #60 / #63 | | Not run | |
+| 20 | Local rc.5 S3: root/non-root prefixes, provider-confirmed exact keys, copy/rename source encoding, paginated folder copy and retained legacy doubled-prefix objects | #57 / #68 / #62 | | Not run | |
 
 Notes on specific rows:
 
@@ -64,6 +71,15 @@ Notes on specific rows:
   events. Only later external changes are muted.
 - **Rows 2 and 7** already have reporter passes on the 2.15.3-rc.2 build, listed
   in the checklist. Those do not fill these rows for 2.15.4.
+- **Rows 14-16** require 2.15.5-rc.2 or later as described in
+  [the next release outline](NEXT_RELEASE.md), not 2.15.5-rc.1. Recover local
+  items from `.trash/folderbridge-<unique>/<original-name>` by copying them back
+  to their original source location. Pause external writers for cross-volume
+  tests: copy-then-remove is not an atomic operation across filesystems.
+  Verify fallback behavior in the real Obsidian host, not only adapter tests.
+- **Rows 17-18** require 2.15.5-rc.3 or later. Test ordinary mount moves separately
+  from explicit device-path changes. Existing saved deletion preferences are not
+  reset by the upgrade; record the initial preference and use only disposable data.
 
 ## Collecting A Console Stack
 

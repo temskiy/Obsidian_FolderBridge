@@ -10,11 +10,37 @@ Extends Obsidian's single-root vault by letting you mount external folders as se
 
 The included 2.15.3 improvements cover mounted-file refresh and cached reads, Windows/WSL path handling, watcher suppression transitions, local startup metadata batching, explorer integration, device-specific paths, and managed TOC controls. See the [changelog](CHANGELOG.md) for the complete release history.
 
-**Prerelease for testing:** [2.15.5-rc.1](https://github.com/tescolopio/Obsidian_FolderBridge/releases/tag/2.15.5-rc.1) is an opt-in prerelease, not the latest stable release. It fixes the plugin failing to load on Android (#18) and mounts with suppressed watcher events appearing empty after restart (#16). WebDAV mounts do not work on Android in that build. Use a disposable vault and back up your sources.
+**Prerelease for testing:** [2.15.5-rc.4](https://github.com/tescolopio/Obsidian_FolderBridge/releases/tag/2.15.5-rc.4) is the opt-in SFTP identity-verification candidate, not a stable promotion. Existing unpinned SFTP mounts now require independently verified fingerprint approval before authentication; changed keys are refused. Approval is outside bounded network/authentication deadlines. It retains rc.3's override-preservation and remote-root trash-dialog fixes, rc.2's recoverable local trash, remote-trash refusal, append safety and path hardening, plus rc.1's Android-loading and suppressed-startup fixes. Native confirmation remains pending; WebDAV remains unavailable on Android.
+
+**Candidate limitations:** use a disposable vault and copied sources. Local
+trash uses a separate recovery folder per deletion. Native SFTP trust validation,
+S3 prefix/copy fixes, the non-C whole-drive ancestor policy, dependency advisories
+and native validation remain unresolved. The [release outline](docs/NEXT_RELEASE.md)
+and [rc.4 notes](CHANGELOG.md#2155-rc4---2026-10-03) distinguish included changes
+from those remaining gates. Existing root-deletion preferences are preserved;
+review that setting if a failed rc.2 remote-trash attempt changed your choice.
+Stable 2.15.4 remains latest.
+
+**Local development candidate:** unpublished 2.15.5-rc.5 adds the combined S3
+prefix/copy-source corrections on top of all rc.4 fixes. It is not available in
+the rc.4 release assets. Existing doubled-prefix objects are not automatically
+migrated or deleted; inspect the bucket before resuming writes. See the
+[Windows cumulative test checklist](docs/WINDOWS_TEST_CHECKLIST.md).
 
 **Validation limits (stable 2.15.4):** the release passed 400 automated tests across 13 files, plus lint, UI text checks, typechecking, and the production build. The full native Windows/WSL, macOS, Android, and current/oldest Obsidian host checks remain incomplete. Reporters confirmed two specific fixes on the earlier rc.2 build, not the complete 2.15.4 matrix. Automated tests do not establish native editor, Outline, metadata, or save compatibility. Back up your vault, settings, and mounted source folders; test writes on disposable copies. See the [release validation checklist](docs/RELEASE_VALIDATION.md).
 
 ## Full Feature List
+
+**SFTP trust in 2.15.5-rc.4:** connections require explicit host-key
+fingerprint approval before authentication; earlier prereleases do not include this behavior.
+Existing unpinned mounts require approval after upgrading to rc.4.
+Compare the displayed fingerprint with the server administrator
+over a trusted channel. Changed keys are refused; forgetting a saved key is an
+explicit edit saved in mount settings, not an automatic recovery action.
+Key discovery uses a bounded connection without authentication. That connection
+closes before approval, so comparing fingerprints is not limited by the SSH
+handshake deadline. Authentication uses a fresh, bounded connection that must
+present the same approved key; it cannot open another approval prompt.
 
 ### Core
 
@@ -311,6 +337,35 @@ Prevent any write operations through a specific mount (useful for reference fold
 - Toggle a single mount by name with the **Folder Bridge: Toggle read-only on a specific mount…** command (assignable to a hotkey)
 - Obsidian can still open, search, and read all files in the mount
 - Any attempt to create, edit, rename, or delete a file through the mount is silently blocked with a one-time Notice
+
+---
+
+### Local Save Safety (Unpublished Integration)
+
+The save-safety integration branch builds on rc.5; the earlier installed rc.5
+candidate and published rc.4 assets do not contain these additional changes.
+
+- Creating a new mounted file refuses to replace an existing, unindexed file.
+- Windows-1252 and BOM-marked UTF-16 notes can be read, but text saving/appending
+  refuses to silently convert them. Convert a copy to UTF-8 externally first.
+- Overwriting a non-empty local file requires a temporary recovery copy under
+  `<vault>/.trash/folderbridge-saving/save-<unique>/<original-name>`.
+  A failed backup refuses the save. A failed write retains the old version and
+  reports its recovery path; a successful save removes the temporary copy.
+- **Changes on the drive before saving** defaults to **Keep a conflict copy**.
+  Changed or unverified versions are retained under
+  `<vault>/.trash/folderbridge-conflicts/conflict-<unique>/<original-name>`.
+  Content fingerprints also detect equal-size changes with unchanged timestamps.
+  Automatic merging and editor reload are not enabled. The explicit overwrite
+  option skips conflict copies, but not required temporary recovery copies.
+- An unread file, changed mount route, evicted fingerprint or background read
+  can lead to a conservative extra conflict copy. Copies are retained for
+  manual review with no automatic cleanup. Stop writers before restoring.
+
+Local save/append/process operations are serialized per resolved path. This is
+not an atomic lock against other programs, sync tools or SMB clients, and does
+not replace backups or version history. Validate on disposable data using the
+[Windows checklist](docs/WINDOWS_TEST_CHECKLIST.md).
 
 ---
 

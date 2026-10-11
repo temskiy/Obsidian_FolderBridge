@@ -1,7 +1,7 @@
 import { normalizePath, Notice, DataAdapter, DataWriteOptions } from 'obsidian';
 import { PathMapper } from './PathMapper';
 import { SecurityManager } from './SecurityManager';
-import { MountPoint } from './types';
+import { LocalConflictMode, MountPoint } from './types';
 import { WebDAVAdapter } from './WebDAVAdapter';
 import { S3Adapter } from './S3Adapter';
 import { SFTPAdapter } from './SFTPAdapter';
@@ -9,6 +9,7 @@ import { FileServer, STREAMING_MIME } from './FileServer';
 import { logger } from './logger';
 import { isVisibleFileInMount } from './mountFileFilter';
 import { loadOptionalNodeModule } from './runtimeNode';
+import { decodeText } from './textEncoding';
 import {
 	realPathToResourceUrl,
 	tryReadAsDataUri,
@@ -24,6 +25,7 @@ import {
 // will be null; local-mount operations gracefully fail while WebDAV mounts work.
 const fs: typeof import('fs') = loadOptionalNodeModule<typeof import('fs')>('fs') ?? null as never;
 const path: typeof import('path') = loadOptionalNodeModule<typeof import('path')>('path') ?? null as never;
+const crypto: typeof import('crypto') = loadOptionalNodeModule<typeof import('crypto')>('crypto') ?? null as never;
 
 /**
  * VirtualAdapter is a shim that wraps Obsidian's built-in FileSystemAdapter.
@@ -42,7 +44,7 @@ export class VirtualAdapter {
 	private pathMapper: PathMapper;
 	private security: SecurityManager;
 	private dryRun: boolean;
-	private onMountRootDelete: (mount: MountPoint) => Promise<'unmount' | 'delete' | 'cancel'>;
+	private onMountRootDelete: (mount: MountPoint, trash?: boolean) => Promise<'unmount' | 'delete' | 'cancel'>;
 	private onMountRootMove: (mount: MountPoint, newVirtualPath: string) => Promise<void>;
 	private isIgnored: (name: string, mount: MountPoint, mountRelativePath?: string) => boolean;
 	/** WebDAV client instances keyed by mount.id, managed by the plugin. */
@@ -75,6 +77,21 @@ export class VirtualAdapter {
 	 * external watcher backend is unavailable or suppressed.
 	 */
 	private onDelete?: (normalizedPath: string) => Promise<void>;
+	/**
+	 * The modification time Obsidian has for a vault path, or undefined when
+	 * Obsidian doesn't know the file (set by the plugin from the vault index).
+	 * A write to a path Obsidian doesn't know is a create, and a create must
+	 * never replace a file that already exists on the drive.
+	 */
+	getKnownMtime?: (normalizedPath: string) => number | undefined;
+	getConflictMode?: () => LocalConflictMode;
+	private observedContent = new Map<string, string>();
+	private localSaveQueues = new Map<string, Promise<void>>();
+	/**
+	 * Mounted text files (vault paths) last read in an encoding other than
+	 * UTF-8. Saving them is refused; see src/textEncoding.ts.
+	 */
+	private nonUtf8Files: Set<string> = new Set();
 
 	constructor(
 		original: unknown,
@@ -82,7 +99,7 @@ export class VirtualAdapter {
 		security: SecurityManager,
 		dryRun = false,
 		maxDataUriBytes = 10 * 1024 * 1024,
-		onMountRootDelete: (mount: MountPoint) => Promise<'unmount' | 'delete' | 'cancel'>,
+		onMountRootDelete: (mount: MountPoint, trash?: boolean) => Promise<'unmount' | 'delete' | 'cancel'>,
 		onMountRootMove: (mount: MountPoint, newVirtualPath: string) => Promise<void>,
 		isIgnored: (name: string, mount: MountPoint, mountRelativePath?: string) => boolean,
 		onModify?: (normalizedPath: string) => Promise<void>,
@@ -564,7 +581,13 @@ export class VirtualAdapter {
 			const realPath = this.toReal(normalizedPath, mount);
 			this.assertAllowed(realPath);
 			try {
-				return await fs.promises.readFile(realPath, 'utf8');
+				const bytes = await fs.promises.readFile(realPath);
+				const { text, nonUtf8 } = decodeText(bytes);
+				this.rememberContent(realPath, bytes, false);
+				const key = normalizePath(normalizedPath);
+				if (nonUtf8) this.nonUtf8Files.add(key);
+				else this.nonUtf8Files.delete(key);
+				return text;
 			} catch (e) {
 				logger.error(`[FolderBridge] read failed for "${realPath}":`, e);
 				if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -615,6 +638,7 @@ export class VirtualAdapter {
 			this.assertAllowed(realPath);
 			try {
 				const buf = await fs.promises.readFile(realPath);
+				this.rememberContent(realPath, buf, false);
 				// Return a proper ArrayBuffer (buf.buffer may be a shared Buffer pool slice)
 				return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 			} catch (e) {
@@ -639,6 +663,225 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 	// write / writeBinary / append / process
 	// ------------------------------------------------------------------
+
+	/** Reserve a recovery directory before overwriting an existing non-empty file. */
+	private async makeSafetyCopy(realPath: string): Promise<string | null> {
+		try {
+			const current = await fs.promises.stat(realPath);
+			if (!current.isFile()) throw new Error('the destination is not a regular file');
+			if (current.size === 0) return null;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+			throw new Error(`Folder Bridge: Save refused because the original file could not be checked: ${String(error)}`);
+		}
+		let recoveryDir: string | undefined;
+		try {
+			const basePath = (this.orig() as DataAdapter & { getBasePath?(): string }).getBasePath?.();
+			if (!basePath) throw new Error('the vault folder could not be located');
+			const directory = path.join(basePath, '.trash', 'folderbridge-saving');
+			await fs.promises.mkdir(directory, { recursive: true });
+			recoveryDir = await fs.promises.mkdtemp(path.join(directory, 'save-'));
+			const copy = path.join(recoveryDir, path.basename(realPath));
+			await fs.promises.copyFile(realPath, copy, fs.constants.COPYFILE_EXCL);
+			return copy;
+		} catch (error) {
+			const recovery = recoveryDir ? ` Inspect the incomplete recovery copy at "${recoveryDir}".` : '';
+			throw new Error(`Folder Bridge: Save refused because a safety copy could not be made; the original file was not overwritten.${recovery} ${String(error)}`);
+		}
+	}
+
+	private localSaveKey(realPath: string): string {
+		const resolved = path.resolve(realPath);
+		return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	}
+
+	private rememberContent(realPath: string, bytes: Uint8Array, replace: boolean): void {
+		if (!this.getKnownMtime) return;
+		const key = this.localSaveKey(realPath);
+		// Keep the oldest observed version until our next save: background reads
+		// must not make a stale editor appear up to date.
+		if (!replace && this.observedContent.has(key)) return;
+		this.observedContent.delete(key);
+		this.observedContent.set(key, crypto.createHash('sha256').update(bytes).digest('hex'));
+		if (this.observedContent.size > 512) {
+			for (const oldest of this.observedContent.keys()) {
+				this.observedContent.delete(oldest);
+				break;
+			}
+		}
+	}
+
+	private async withLocalSave<T>(realPath: string, action: () => Promise<T>): Promise<T> {
+		const key = this.localSaveKey(realPath);
+		const previous = this.localSaveQueues.get(key) ?? Promise.resolve();
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		const tail = previous.then(() => gate);
+		this.localSaveQueues.set(key, tail);
+		await previous;
+		try {
+			return await action();
+		} finally {
+			release();
+			if (this.localSaveQueues.get(key) === tail) this.localSaveQueues.delete(key);
+		}
+	}
+
+	private async preserveConflict(normalizedPath: string, realPath: string, bytes: Buffer | null, content: string | Buffer): Promise<string | null> {
+		if (!this.getKnownMtime || this.getKnownMtime(normalizePath(normalizedPath)) === undefined ||
+			this.getConflictMode?.() === 'overwrite' || bytes === null) return null;
+		const desired = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
+		if (bytes.equals(desired)) return null;
+		const observed = this.observedContent.get(this.localSaveKey(realPath));
+		if (observed === crypto.createHash('sha256').update(bytes).digest('hex')) return null;
+		let directory: string | undefined;
+		try {
+			const basePath = (this.orig() as DataAdapter & { getBasePath?(): string }).getBasePath?.();
+			if (!basePath) throw new Error('the vault folder could not be located');
+			const root = path.join(basePath, '.trash', 'folderbridge-conflicts');
+			await fs.promises.mkdir(root, { recursive: true });
+			directory = await fs.promises.mkdtemp(path.join(root, 'conflict-'));
+			const copy = path.join(directory, path.basename(realPath));
+			await fs.promises.writeFile(copy, bytes, { flag: 'wx' });
+			return copy;
+		} catch (error) {
+			const location = directory ? ` Inspect "${directory}" for an incomplete copy.` : '';
+			throw new Error(`Folder Bridge: Save refused because the changed version could not be preserved.${location} ${String(error)}`);
+		}
+	}
+
+	private async writeLocalFile(normalizedPath: string, realPath: string, content: string | Buffer, op: string): Promise<void> {
+		return this.withLocalSave(realPath, () => this.writeLocalFileUnlocked(normalizedPath, realPath, content, op));
+	}
+
+	private assertLocalSaveCurrent(normalizedPath: string, realPath: string): void {
+		const mount = this.pathMapper.getMountForPath(normalizedPath);
+		if (!mount || mount.mountType === 'webdav' || mount.mountType === 's3' || mount.mountType === 'sftp' ||
+			this.localSaveKey(this.toReal(normalizedPath, mount)) !== this.localSaveKey(realPath)) {
+			throw new Error('Folder Bridge: Save refused because the mount route changed while the save was waiting. Reopen the file and try again.');
+		}
+		if (mount.readOnly || this.isPathIgnored(normalizedPath, mount)) {
+			throw new Error('Folder Bridge: Save refused because the mount is now read-only or the file is ignored.');
+		}
+		this.assertVisibleMountFile(normalizedPath, mount);
+		this.assertAllowed(realPath);
+		this.assertNotReserved(realPath);
+	}
+
+	// Write in place to preserve file identity, ACLs and open handles on shared drives.
+	private async writeLocalFileUnlocked(normalizedPath: string, realPath: string, content: string | Buffer, op: string): Promise<void> {
+		this.assertLocalSaveCurrent(normalizedPath, realPath);
+		const isCreate = this.getKnownMtime !== undefined && this.getKnownMtime(normalizePath(normalizedPath)) === undefined;
+		await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
+		let copy: string | null = null;
+		let conflict: string | null = null;
+		try {
+			const encoding = typeof content === 'string' ? 'utf8' : undefined;
+			if (isCreate) {
+				this.assertLocalSaveCurrent(normalizedPath, realPath);
+				await fs.promises.writeFile(realPath, content, { flag: 'wx', encoding });
+			}
+			else {
+				let bytes: Buffer | null;
+				try {
+					bytes = await fs.promises.readFile(realPath);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+					bytes = null;
+				}
+				if (encoding) await this.assertTextSavable(normalizedPath, realPath);
+				conflict = await this.preserveConflict(normalizedPath, realPath, bytes, content);
+				copy = await this.makeSafetyCopy(realPath);
+				this.assertLocalSaveCurrent(normalizedPath, realPath);
+				if (encoding) await fs.promises.writeFile(realPath, content, encoding);
+				else await fs.promises.writeFile(realPath, content);
+			}
+		} catch (e) {
+			if (isCreate && (e as NodeJS.ErrnoException).code === 'EEXIST') {
+				const err = new Error(
+					`Folder Bridge: "${path.basename(realPath)}" already exists on the drive, so it was not replaced. ` +
+					`It may have just been created by someone else; it will appear in the vault shortly. Choose another name.`
+				) as NodeJS.ErrnoException;
+				err.code = 'EEXIST';
+				throw err;
+			}
+			const recovery = (copy ? ` The previous version is kept at "${copy}".` : '') +
+				(conflict ? ` The changed version is kept at "${conflict}".` : '');
+			if ((e as Error).message?.startsWith('Folder Bridge:')) {
+				if (recovery) throw new Error((e as Error).message + recovery);
+				throw e;
+			}
+			throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, op)}${recovery}`);
+		}
+		this.rememberContent(realPath, typeof content === 'string' ? Buffer.from(content, 'utf8') : content, true);
+		if (conflict) new Notice(`Folder Bridge: Saved your changes. The previous changed or unverified version is kept at "${conflict}".`, 10000);
+		if (copy) {
+			try {
+				await fs.promises.unlink(copy);
+				await fs.promises.rmdir(path.dirname(copy));
+			} catch (error) {
+				logger.warn(`[FolderBridge] Save succeeded, but recovery-copy cleanup failed at "${copy}":`, error);
+			}
+		}
+	}
+
+	/**
+	 * Refuse a text save over a mounted file stored in another encoding:
+	 * writing UTF-8 would change its bytes for every other program and
+	 * colleague that reads it in its own encoding. The flag is re-checked
+	 * against the file on disk, so a file converted to UTF-8 (or replaced)
+	 * since it was read can be saved again.
+	 */
+	private async assertTextSavable(normalizedPath: string, realPath: string): Promise<void> {
+		const key = normalizePath(normalizedPath);
+		let stillNonUtf8 = false;
+		try {
+			stillNonUtf8 = decodeText(await fs.promises.readFile(realPath)).nonUtf8;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+				throw new Error(`Folder Bridge: Could not verify text encoding before saving "${realPath}": ${translateFsError(error as NodeJS.ErrnoException, 'read')}`);
+			}
+		}
+		if (!stillNonUtf8) {
+			this.nonUtf8Files.delete(key);
+			return;
+		}
+		throw new Error(
+			`Folder Bridge: "${path.basename(realPath)}" is not stored as UTF-8 text (it uses an older Windows encoding or UTF-16). ` +
+			`Saving it from Obsidian would change characters such as £ € é for everyone else who opens it, so it was not saved. ` +
+			`Convert it to UTF-8 in the program that created it, or edit it there.`
+		);
+	}
+
+	/** Keep the non-UTF-8 flags of a renamed file or folder with it. */
+	private moveNonUtf8Flags(oldPath: string, newPath: string): void {
+		const from = normalizePath(oldPath);
+		const to = normalizePath(newPath);
+		for (const key of [...this.nonUtf8Files]) {
+			if (key === from || key.startsWith(from + '/')) {
+				this.nonUtf8Files.delete(key);
+				this.nonUtf8Files.add(to + key.slice(from.length));
+			}
+		}
+	}
+
+	private async appendLocalFile(normalizedPath: string, realPath: string, content: string | Buffer): Promise<void> {
+		await this.withLocalSave(realPath, async () => {
+			this.assertLocalSaveCurrent(normalizedPath, realPath);
+			let previous: Buffer;
+			try {
+				previous = await fs.promises.readFile(realPath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+				previous = Buffer.alloc(0);
+			}
+			if (typeof content === 'string') await this.assertTextSavable(normalizedPath, realPath);
+			const added = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
+			this.assertLocalSaveCurrent(normalizedPath, realPath);
+			await fs.promises.appendFile(realPath, added);
+			this.rememberContent(realPath, Buffer.concat([previous, added]), true);
+		});
+	}
 
 	async write(normalizedPath: string, data: string, options?: unknown): Promise<void> {
 		const mount = this.pathMapper.getMountForPath(normalizedPath);
@@ -671,16 +914,16 @@ export class VirtualAdapter {
 
 			this.assertAllowed(realPath);
 			this.assertNotReserved(realPath);
+			await this.assertTextSavable(normalizedPath, realPath);
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] write → ${realPath}`); return; }
 			try {
-				await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
-				await fs.promises.writeFile(realPath, data, 'utf8');
+				await this.writeLocalFile(normalizedPath, realPath, data, 'write');
 				void this.onModify?.(normalizedPath).catch(() => { });
 				return;
 			} catch (e) {
-				const errorMsg = `Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'write')}`;
-				logger.error(`[FolderBridge] write failed for "${realPath}":`, e, errorMsg);
-				throw new Error(errorMsg);
+				logger.error(`[FolderBridge] write failed for "${realPath}":`, e);
+				if ((e as Error).message?.startsWith('Folder Bridge:')) throw e;
+				throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'write')}`);
 			}
 		}
 		return this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
@@ -718,11 +961,11 @@ export class VirtualAdapter {
 			this.assertNotReserved(realPath);
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] writeBinary → ${realPath}`); return; }
 			try {
-				await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
-				await fs.promises.writeFile(realPath, Buffer.from(data));
+				await this.writeLocalFile(normalizedPath, realPath, Buffer.from(data), 'writeBinary');
 				void this.onModify?.(normalizedPath).catch(() => { });
 				return;
 			} catch (e) {
+				if ((e as Error).message?.startsWith('Folder Bridge:')) throw e;
 				throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'writeBinary')}`);
 			}
 		}
@@ -758,9 +1001,10 @@ export class VirtualAdapter {
 			}
 			const realPath = this.toReal(normalizedPath, mount);
 			this.assertAllowed(realPath);
+			await this.assertTextSavable(normalizedPath, realPath);
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] append → ${realPath}`); return; }
 			try {
-				await fs.promises.appendFile(realPath, data, 'utf8');
+				await this.appendLocalFile(normalizedPath, realPath, data);
 				void this.onModify?.(normalizedPath).catch(() => { });
 				return;
 			} catch (e) {
@@ -784,7 +1028,7 @@ export class VirtualAdapter {
 		this.assertNotReserved(realPath);
 		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] appendBinary: ${realPath}`); return; }
 		try {
-			await fs.promises.appendFile(realPath, Buffer.from(data));
+			await this.appendLocalFile(normalizedPath, realPath, Buffer.from(data));
 			void this.onModify?.(normalizedPath).catch(() => { });
 		} catch (error) {
 			throw new Error(`Folder Bridge: ${translateFsError(error as NodeJS.ErrnoException, 'appendBinary')}`);
@@ -800,6 +1044,17 @@ export class VirtualAdapter {
 		if (mount) {
 			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot process ignored path "${normalizedPath}"`);
 			this.assertVisibleMountFile(normalizedPath, mount);
+			if (mount.mountType !== 'webdav' && mount.mountType !== 's3' && mount.mountType !== 'sftp' && !mount.readOnly && !this.dryRun) {
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				return this.withLocalSave(realPath, async () => {
+					const updated = fn(await this.read(normalizedPath));
+					await this.writeLocalFileUnlocked(normalizedPath, realPath, updated, 'process');
+					void this.onModify?.(normalizedPath).catch(() => { });
+					return updated;
+				});
+			}
 			const content = await this.read(normalizedPath);
 			const updated = fn(content);
 			await this.write(normalizedPath, updated, options);
@@ -926,8 +1181,30 @@ export class VirtualAdapter {
 	// trash / remove
 	// ------------------------------------------------------------------
 
-	private async handleRootMountDeletion(rootMount: MountPoint): Promise<boolean> {
-		const action = await this.onMountRootDelete(rootMount);
+	/**
+	 * Mount roots whose real deletion the user already confirmed in
+	 * trashSystem().  When the system trash then fails and Obsidian falls
+	 * back to trashLocal(), the confirmation is consumed instead of asking
+	 * the same question a second time.  Entries expire quickly so a stale
+	 * confirmation can never silently authorise a later, unrelated delete.
+	 */
+	private confirmedRootDeletions: Map<string, number> = new Map();
+	private static readonly ROOT_DELETION_CONFIRM_TTL_MS = 5000;
+
+	private rootDeletionConfirmationKey(mount: MountPoint): string {
+		return JSON.stringify([mount.id, this.pathMapper.getEffectiveRealPath(mount)]);
+	}
+
+	private consumeRootDeletionConfirmation(mount: MountPoint): boolean {
+		const key = this.rootDeletionConfirmationKey(mount);
+		const confirmedAt = this.confirmedRootDeletions.get(key);
+		this.confirmedRootDeletions.delete(key);
+		return confirmedAt !== undefined &&
+			Date.now() - confirmedAt <= VirtualAdapter.ROOT_DELETION_CONFIRM_TTL_MS;
+	}
+
+	private async handleRootMountDeletion(rootMount: MountPoint, trash = false): Promise<boolean> {
+		const action = await this.onMountRootDelete(rootMount, trash);
 		if (action === 'cancel') {
 			throw new Error(`Folder Bridge: Deletion cancelled.`);
 		}
@@ -939,10 +1216,17 @@ export class VirtualAdapter {
 		return false; // Proceed with real deletion
 	}
 
+	private assertRecoverableTrash(mount: MountPoint): void {
+		if (mount.mountType === 'webdav' || mount.mountType === 's3' || mount.mountType === 'sftp') {
+			throw new Error(`Folder Bridge: Recoverable trash is unavailable for ${mount.mountType} mounts. The item was not deleted. Use an explicit permanent-delete action only if you intend to delete it permanently.`);
+		}
+	}
+
 	async trashSystem(normalizedPath: string): Promise<boolean> {
 		const rootMount = this.pathMapper.getMountByVirtualPath(normalizedPath);
 		if (rootMount) {
-			const handled = await this.handleRootMountDeletion(rootMount);
+			this.confirmedRootDeletions.delete(this.rootDeletionConfirmationKey(rootMount));
+			const handled = await this.handleRootMountDeletion(rootMount, true);
 			if (handled) return true;
 		}
 
@@ -950,50 +1234,80 @@ export class VirtualAdapter {
 		if (mount) {
 			if (mount.readOnly) { this.warnReadOnly(mount); return true; }
 			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot trash ignored path "${normalizedPath}"`);
+			this.assertRecoverableTrash(mount);
 			const realPath = this.toReal(normalizedPath, mount);
-			const webdavTS = this.getWebDAV(mount);
-			if (webdavTS) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
-				await webdavTS.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
-			const s3TS = this.getS3(mount);
-			if (s3TS) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (s3) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
-				await s3TS.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
-			const sftpTS = this.getSFTP(mount);
-			if (sftpTS) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
-				await sftpTS.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
 			this.assertAllowed(realPath);
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem → ${realPath}`); return true; }
-			try {
-				const electron = loadOptionalNodeModule<{ shell?: { trashItem(p: string): Promise<string> } }>('electron');
-				const shell = electron?.shell;
-				await shell?.trashItem(realPath);
-				await this.notifyDelete(normalizedPath);
-				return true;
-			} catch {
-				// Fallback: permanent delete
-				await fs.promises.rm(realPath, { recursive: true, force: true });
-				await this.notifyDelete(normalizedPath);
-				return true;
+			// Never fall back to a permanent delete here.  Per the DataAdapter
+			// contract, returning false tells Obsidian the system trash is
+			// unavailable (network volume, no trash support, no Electron shell)
+			// and it then calls trashLocal(), which keeps the data recoverable.
+			const electron = loadOptionalNodeModule<{ shell?: { trashItem(p: string): Promise<void> } }>('electron');
+			const shell = electron?.shell;
+			if (!shell?.trashItem) {
+				logger.warn('[FolderBridge] System trash is unavailable; use the vault trash fallback.');
+				if (rootMount) this.confirmedRootDeletions.set(this.rootDeletionConfirmationKey(rootMount), Date.now());
+				return false;
 			}
+			try {
+				await shell.trashItem(realPath);
+			} catch (e) {
+				logger.warn(`[FolderBridge] System trash unavailable for "${realPath}"; falling back to the vault .trash folder.`, e);
+				if (rootMount) this.confirmedRootDeletions.set(this.rootDeletionConfirmationKey(rootMount), Date.now());
+				return false;
+			}
+			await this.notifyDelete(normalizedPath);
+			return true;
 		}
 		return this.orig().trashSystem(normalizedPath);
 	}
 
+	private async moveToVaultTrash(realPath: string): Promise<void> {
+		const basePath = (this.orig() as DataAdapter & { getBasePath?(): string }).getBasePath?.();
+		if (!basePath) {
+			throw new Error('Folder Bridge: cannot locate the vault .trash folder, so the item was not deleted.');
+		}
+		const basename = path.basename(realPath);
+		if (!basename) {
+			throw new Error('Folder Bridge: A filesystem root cannot be moved to the vault trash.');
+		}
+		const trashDir = path.join(basePath, '.trash');
+		await fs.promises.mkdir(trashDir, { recursive: true });
+		const [source, trash] = await Promise.all([
+			fs.promises.realpath(realPath),
+			fs.promises.realpath(trashDir),
+		]);
+		const relativeTrash = path.relative(source, trash);
+		if (!relativeTrash || (!path.isAbsolute(relativeTrash) && relativeTrash !== '..' && !relativeTrash.startsWith(`..${path.sep}`))) {
+			throw new Error('Folder Bridge: The vault trash is inside the item being deleted. The item was not deleted.');
+		}
+
+		// Reserve a private directory atomically; concurrent deletions never share a destination.
+		const recoveryDir = await fs.promises.mkdtemp(path.join(trashDir, 'folderbridge-'));
+		const destination = path.join(recoveryDir, basename);
+		try {
+			try {
+				await fs.promises.rename(realPath, destination);
+			} catch (e) {
+				const err = e as NodeJS.ErrnoException;
+				if (err.code !== 'EXDEV') throw e;
+				await fs.promises.cp(realPath, destination, {
+					recursive: true, errorOnExist: true, force: false,
+					mode: fs.constants.COPYFILE_EXCL, preserveTimestamps: true, verbatimSymlinks: true,
+				});
+				await fs.promises.rm(realPath, { recursive: true });
+			}
+		} catch (e) {
+			const err = e as NodeJS.ErrnoException;
+			logger.error(`[FolderBridge] Trash failed; recovery data, if created, is at "${destination}".`, e);
+			throw new Error(`Folder Bridge: ${translateFsError(err, 'trash')} Recovery data, if created, is at "${destination}".`);
+		}
+	}
+
 	async trashLocal(normalizedPath: string, system?: boolean): Promise<void> {
 		const rootMount = this.pathMapper.getMountByVirtualPath(normalizedPath);
-		if (rootMount) {
-			const handled = await this.handleRootMountDeletion(rootMount);
+		if (rootMount && !this.consumeRootDeletionConfirmation(rootMount)) {
+			const handled = await this.handleRootMountDeletion(rootMount, true);
 			if (handled) return;
 		}
 
@@ -1001,31 +1315,11 @@ export class VirtualAdapter {
 		if (mount) {
 			if (mount.readOnly) { this.warnReadOnly(mount); return; }
 			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot trash ignored path "${normalizedPath}"`);
+			this.assertRecoverableTrash(mount);
 			const realPath = this.toReal(normalizedPath, mount);
-			const webdavTL = this.getWebDAV(mount);
-			if (webdavTL) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdavTL.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			const s3TL = this.getS3(mount);
-			if (s3TL) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3TL.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			const sftpTL = this.getSFTP(mount);
-			if (sftpTL) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftpTL.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
 			this.assertAllowed(realPath);
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal → ${realPath}`); return; }
-			await fs.promises.rm(realPath, { recursive: true, force: true });
+			await this.moveToVaultTrash(realPath);
 			await this.notifyDelete(normalizedPath);
 			return;
 		}
@@ -1221,10 +1515,12 @@ export class VirtualAdapter {
 					// Use fs.promises.cp so that both files and directories are handled.
 					await fs.promises.cp(srcReal, dstReal, { recursive: true });
 					await fs.promises.rm(srcReal, { recursive: true });
+					this.moveNonUtf8Flags(normalizedPath, newNormalizedPath);
 					return;
 				}
 				throw new Error(`Folder Bridge: ${translateFsError(err, 'rename')}`);
 			}
+			this.moveNonUtf8Flags(normalizedPath, newNormalizedPath);
 			return;
 		}
 

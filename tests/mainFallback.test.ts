@@ -12,6 +12,8 @@ import { DEFAULT_SETTINGS, MountPoint } from '../src/types';
 import { serializeTocConfig } from '../src/TocConfig';
 import { checkPathAccessible } from '../src/OSHelpers';
 import { browseFolderOnDisk } from '../src/ui/MountManagerModal';
+import { MountRootDeleteModal } from '../src/ui/MountRootDeleteModal';
+import { SFTPHostKeyModal } from '../src/ui/SFTPHostKeyModal';
 import { replayMountContentsToVault } from '../src/mountScan';
 import { promises as fs } from 'fs';
 import { readFileSync } from 'node:fs';
@@ -25,6 +27,11 @@ vi.mock('obsidian', async importOriginal => {
         ...original,
         Notice: class extends original.Notice {
             setMessage = vi.fn();
+        },
+        Modal: class extends original.Modal {
+            open() {}
+            close() { this.onClose(); }
+            onClose() {}
         },
         FuzzySuggestModal: class extends original.FuzzySuggestModal<MountPoint> {
             setPlaceholder() { return this; }
@@ -97,6 +104,30 @@ function remoteBackend(filename: string) {
         disconnect: vi.fn().mockResolvedValue(undefined),
     };
 }
+
+describe('local conflict settings', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it.each([
+        [{}, 'copy'],
+        [{ localConflictMode: 'overwrite' }, 'overwrite'],
+        [{ localConflictMode: 'merge' }, 'copy'],
+    ])('uses copy for missing or unsupported modes and preserves explicit overwrite', async (saved, expected) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { plugin } = await makePlugin();
+        Object.assign(plugin, { loadData: vi.fn().mockResolvedValue({ deviceId: 'desktop', ...saved }) });
+        await plugin.loadSettings();
+        expect(plugin.settings.localConflictMode).toBe(expected);
+    });
+
+    it('wires the current setting to the installed adapter without reinstalling', async () => {
+        const { plugin } = await makePlugin();
+        (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+        expect(plugin.virtualAdapter?.getConflictMode?.()).toBe('copy');
+        plugin.settings.localConflictMode = 'overwrite';
+        expect(plugin.virtualAdapter?.getConflictMode?.()).toBe('overwrite');
+    });
+});
 
 async function makePlugin(mounts: MountPoint[] = [], source = '', fallback = '') {
     const files = new Map<string, TFile | TFolder>();
@@ -479,6 +510,8 @@ describe('main fallback regressions', () => {
         vi.mocked(checkPathAccessible).mockImplementation(path => path === '/missing'
             ? probe.promise : Promise.resolve({ accessible: true, readOnly: false }));
         const refresh = plugin.notifyVaultMountAdded(existing);
+        vi.mocked(fs.readFile).mockResolvedValue(Buffer.from(''));
+        vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
         try {
             await adapter.write('docs/note.md', 'saved during refresh');
             expect(fs.writeFile).toHaveBeenCalledWith('/active-root/note.md', 'saved during refresh', 'utf8');
@@ -500,6 +533,8 @@ describe('main fallback regressions', () => {
         vi.mocked(checkPathAccessible).mockImplementation(path => path === '/active-root'
             ? probe.promise : Promise.resolve({ accessible: false, readOnly: false }));
         const refresh = plugin.notifyVaultMountAdded(existing);
+        vi.mocked(fs.readFile).mockResolvedValue(Buffer.from(''));
+        vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
         try {
             await vi.waitFor(() => expect(checkPathAccessible).toHaveBeenCalledWith('/active-root'));
             await adapter.write('docs/note.md', 'saved during fallback probe');
@@ -743,7 +778,7 @@ describe('main fallback regressions', () => {
                 starts.push(plugin.pathMapper.getEffectiveRealPath(active));
             }
         } as unknown as FileWatcher;
-        await plugin.updateMount(existing.id, { ...existing, deviceOverrides });
+        await plugin.updateMount(existing.id, { ...existing, deviceOverrides }, { replaceDeviceOverrides: true });
         expect(events.slice(0, 2)).toEqual(['file-removed:docs/old.md', 'folder-removed:docs']);
         expect(starts).toEqual([deviceOverrides?.desktop ?? '/primary']);
     });
@@ -1017,5 +1052,441 @@ describe('main fallback regressions', () => {
         probe.resolve({ accessible: false, readOnly: false });
         await Promise.all([first, second]);
         expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/latest-root');
+    });
+});
+
+describe('mounted creation fallback error propagation', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it.each(['text', 'binary'] as const)('does not register a file after a failed %s fallback write', async kind => {
+        const { plugin, app, files } = await makePlugin([mount('docs')]);
+        Object.assign(app.vault, {
+            create: vi.fn().mockRejectedValue(new Error('Native create unavailable')),
+            createBinary: vi.fn().mockRejectedValue(new Error('Native create unavailable')),
+        });
+        (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+        const stat = vi.spyOn(app.vault.adapter, 'stat');
+        const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+        if (kind === 'text') {
+            vi.spyOn(app.vault.adapter, 'write').mockRejectedValue(error);
+            await expect(app.vault.create('docs/new.md', 'new')).rejects.toBe(error);
+        } else {
+            vi.spyOn(app.vault.adapter, 'writeBinary').mockRejectedValue(error);
+            await expect(app.vault.createBinary('docs/new.md', new Uint8Array([1]).buffer)).rejects.toBe(error);
+        }
+        expect(files.has('docs/new.md')).toBe(false);
+        expect(stat).not.toHaveBeenCalled();
+    });
+});
+
+describe('SFTP host-key trust persistence', () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    const sftpMount = (): MountPoint => ({
+        ...mount('sftp'), mountType: 'sftp', sftpHost: 'example.invalid', sftpUsername: 'tester',
+    });
+    const verify = (plugin: FolderBridgePlugin, target: MountPoint, fingerprint: string, signal = new AbortController().signal, allowApproval = true) =>
+        (plugin as unknown as { verifySFTPHostKey(mount: MountPoint, fingerprint: string, signal: AbortSignal, allowApproval: boolean): Promise<void> })
+            .verifySFTPHostKey(target, fingerprint, signal, allowApproval);
+    const fingerprint = 'SHA256:test-only-key-a';
+    const approve = () => vi.spyOn(SFTPHostKeyModal.prototype, 'open').mockImplementation(function () {
+        Object.assign(this, { contentEl: new SettingsElement() });
+        this.onOpen();
+        const content = this.contentEl as unknown as SettingsElement;
+        content.descendants().find(element => element.text === 'Trust verified key')!.onclick!();
+    });
+
+    it('requires approval and awaits saving the key', async () => {
+        const { plugin, saveData } = await makePlugin([sftpMount()]);
+        const save = deferred<void>();
+        saveData.mockImplementationOnce(() => save.promise);
+        const prompt = approve();
+        let completed = false;
+        const verification = verify(plugin, { ...plugin.settings.mountPoints[0] }, fingerprint).then(() => { completed = true; });
+        await vi.waitFor(() => expect(saveData).toHaveBeenCalledWith(expect.objectContaining({
+            mountPoints: [expect.objectContaining({ sftpHostKeyFingerprint: fingerprint })],
+        })));
+        expect(completed).toBe(false);
+        save.resolve();
+        await verification;
+        expect(prompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not accept an in-memory pin while its persistence is still pending', async () => {
+        const { plugin, saveData } = await makePlugin([sftpMount()]);
+        const save = deferred<void>();
+        saveData.mockImplementationOnce(() => save.promise);
+        approve();
+        const target = { ...plugin.settings.mountPoints[0] };
+        const first = verify(plugin, target, fingerprint);
+        await vi.waitFor(() => expect(plugin.settings.mountPoints[0].sftpHostKeyFingerprint).toBe(fingerprint));
+        let secondFinished = false;
+        const second = verify(plugin, target, fingerprint).then(() => { secondFinished = true; });
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(secondFinished).toBe(false);
+        save.resolve();
+        await Promise.all([first, second]);
+    });
+
+    it.each(['host', 'port', 'reset'] as const)('rejects stale approval after an intervening %s edit', async change => {
+        const { plugin } = await makePlugin([sftpMount()]);
+        let modal!: SFTPHostKeyModal;
+        vi.spyOn(SFTPHostKeyModal.prototype, 'open').mockImplementation(function () { modal = this; });
+        const target = { ...plugin.settings.mountPoints[0] };
+        const result = expect(verify(plugin, target, fingerprint)).rejects.toThrow('stale');
+        const data = { ...target };
+        if (change === 'host') data.sftpHost = 'changed.example.invalid';
+        if (change === 'port') data.sftpPort = 2222;
+        if (change === 'reset') data.sftpForgetHostKey = true;
+        await plugin.updateMount(data.id, data);
+        Object.assign(modal, { contentEl: new SettingsElement() });
+        modal.onOpen();
+        (modal.contentEl as unknown as SettingsElement).descendants().find(element => element.text === 'Trust verified key')!.onclick!();
+        await result;
+        expect(plugin.settings.mountPoints[0].sftpHostKeyFingerprint).toBeUndefined();
+    });
+
+    it('accepts an existing matching pin without prompting and rejects changed keys', async () => {
+        const { plugin } = await makePlugin([{ ...sftpMount(), sftpHostKeyFingerprint: fingerprint }]);
+        const prompt = approve();
+        await verify(plugin, plugin.settings.mountPoints[0], fingerprint);
+        await expect(verify(plugin, plugin.settings.mountPoints[0], 'SHA256:changed')).rejects.toThrow('has changed');
+        expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it('never prompts during authentication if the saved pin was reset', async () => {
+        const { plugin } = await makePlugin([{ ...sftpMount(), sftpHostKeyFingerprint: fingerprint }]);
+        const target = { ...plugin.settings.mountPoints[0] };
+        await plugin.updateMount(target.id, { ...target, sftpForgetHostKey: true });
+        const prompt = approve();
+        await expect(verify(plugin, target, fingerprint, undefined, false)).rejects.toThrow('reset');
+        expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it('does not wait on a different pending approval during authentication', async () => {
+        const { plugin, saveData } = await makePlugin([sftpMount()]);
+        const save = deferred<void>();
+        saveData.mockImplementationOnce(() => save.promise);
+        approve();
+        const target = { ...plugin.settings.mountPoints[0] };
+        const first = verify(plugin, target, fingerprint);
+        await vi.waitFor(() => expect(plugin.settings.mountPoints[0].sftpHostKeyFingerprint).toBe(fingerprint));
+        await expect(verify(plugin, target, fingerprint, undefined, false)).rejects.toThrow('still pending');
+        save.resolve();
+        await first;
+    });
+
+    it('rolls back a pin when persistence fails', async () => {
+        const { plugin, saveData } = await makePlugin([sftpMount()]);
+        approve();
+        saveData.mockRejectedValueOnce(new Error('Disk write failed'));
+        await expect(verify(plugin, plugin.settings.mountPoints[0], fingerprint)).rejects.toThrow('could not be saved');
+        expect(plugin.settings.mountPoints[0].sftpHostKeyFingerprint).toBeUndefined();
+    });
+
+    it('shares one prompt and rejects a concurrent different key', async () => {
+        const { plugin } = await makePlugin([sftpMount()]);
+        let modal!: SFTPHostKeyModal;
+        const prompt = vi.spyOn(SFTPHostKeyModal.prototype, 'open').mockImplementation(function () { modal = this; });
+        const target = { ...plugin.settings.mountPoints[0] };
+        const first = verify(plugin, target, fingerprint);
+        const second = expect(verify(plugin, target, 'SHA256:changed')).rejects.toThrow('has changed');
+        Object.assign(modal, { contentEl: new SettingsElement() });
+        modal.onOpen();
+        (modal.contentEl as unknown as SettingsElement).descendants().find(element => element.text === 'Trust verified key')!.onclick!();
+        await Promise.all([first, second]);
+        expect(prompt).toHaveBeenCalledOnce();
+    });
+
+    it('cancel leaves no pin and does not repeatedly prompt until reconnect', async () => {
+        const { plugin, saveData } = await makePlugin([sftpMount()]);
+        saveData.mockClear();
+        const prompt = vi.spyOn(SFTPHostKeyModal.prototype, 'open').mockImplementation(function () {
+            Object.assign(this, { contentEl: new SettingsElement() });
+            this.onClose();
+        });
+        await expect(verify(plugin, plugin.settings.mountPoints[0], fingerprint)).rejects.toThrow('cancelled');
+        await expect(verify(plugin, plugin.settings.mountPoints[0], fingerprint)).rejects.toThrow('paused');
+        expect(prompt).toHaveBeenCalledOnce();
+        expect(saveData).not.toHaveBeenCalled();
+    });
+
+    it('aborting an outstanding connection closes its prompt without saving', async () => {
+        const { plugin, saveData } = await makePlugin([sftpMount()]);
+        saveData.mockClear();
+        vi.spyOn(SFTPHostKeyModal.prototype, 'open').mockImplementation(function () {
+            Object.assign(this, { contentEl: new SettingsElement() });
+        });
+        const controller = new AbortController();
+        const result = expect(verify(plugin, plugin.settings.mountPoints[0], fingerprint, controller.signal)).rejects.toThrow('cancelled');
+        controller.abort();
+        await result;
+        expect(saveData).not.toHaveBeenCalled();
+    });
+
+    it.each(['host', 'port', 'reset', 'type'] as const)('clears trust on %s change and never persists the reset flag', async change => {
+        const { plugin, saveData } = await makePlugin([{ ...sftpMount(), sftpHostKeyFingerprint: fingerprint }]);
+        const data = { ...plugin.settings.mountPoints[0] };
+        if (change === 'host') data.sftpHost = 'new.example.invalid';
+        if (change === 'port') data.sftpPort = 2222;
+        if (change === 'reset') data.sftpForgetHostKey = true;
+        if (change === 'type') data.mountType = 's3';
+        await plugin.updateMount(data.id, data);
+        expect(plugin.settings.mountPoints[0].sftpHostKeyFingerprint).toBeUndefined();
+        expect(saveData).toHaveBeenLastCalledWith(expect.objectContaining({
+            mountPoints: [expect.not.objectContaining({ sftpForgetHostKey: true })],
+        }));
+    });
+
+    it('ordinary edits preserve the pin even if the input omits it', async () => {
+        const { plugin } = await makePlugin([{ ...sftpMount(), sftpHostKeyFingerprint: fingerprint }]);
+        const data = { ...plugin.settings.mountPoints[0], virtualPath: 'Moved' };
+        delete data.sftpHostKeyFingerprint;
+        await plugin.updateMount(data.id, data);
+        expect(plugin.settings.mountPoints[0].sftpHostKeyFingerprint).toBe(fingerprint);
+    });
+});
+
+describe('unsafe device overrides', () => {
+    beforeEach(() => {
+        vi.mocked(Notice).mockClear();
+        vi.mocked(checkPathAccessible).mockImplementation(() => Promise.resolve({ accessible: true, readOnly: false }));
+        vi.spyOn(fs, 'readFile').mockResolvedValue(serializeTocConfig([]));
+        vi.spyOn(fs, 'writeFile').mockResolvedValue(undefined);
+        vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    const persistedOverrides = (plugin: FolderBridgePlugin) =>
+        (plugin as unknown as { persistedMountPoints: MountPoint[] }).persistedMountPoints[0].deviceOverrides;
+
+    it('does not resolve or allowlist a protected override for this device', async () => {
+        const { plugin } = await makePlugin([{ ...mount('docs', '/primary'), deviceOverrides: { desktop: '/etc' } }]);
+        const mapped = plugin.pathMapper.getMountByVirtualPath('docs')!;
+
+        expect(plugin.pathMapper.getEffectiveRealPath(mapped)).toBe('/primary');
+        expect(plugin.pathMapper.toRealPath('docs/note.md', mapped)).not.toContain('etc');
+        expect(plugin.settings.allowlist).not.toContain('/etc');
+        expect(plugin.settings.allowlist).toContain('/primary');
+    });
+
+    it('keeps the stored override so nothing is destroyed on disk', async () => {
+        const { plugin } = await makePlugin([{ ...mount('docs', '/primary'), deviceOverrides: { desktop: '/etc' } }]);
+        expect(persistedOverrides(plugin)).toEqual({ desktop: '/etc' });
+    });
+
+    it('still honors a safe override for this device', async () => {
+        const { plugin } = await makePlugin([{ ...mount('docs', '/primary'), deviceOverrides: { desktop: '/override' } }]);
+        const mapped = plugin.pathMapper.getMountByVirtualPath('docs')!;
+
+        expect(plugin.pathMapper.getEffectiveRealPath(mapped)).toBe('/override');
+        expect(plugin.settings.allowlist).toContain('/override');
+    });
+
+    it('only checks this device: another device\'s entry does not affect it', async () => {
+        const { plugin } = await makePlugin([{
+            ...mount('docs', '/primary'), deviceOverrides: { laptop: '/etc', desktop: '/override' },
+        }]);
+        const mapped = plugin.pathMapper.getMountByVirtualPath('docs')!;
+
+        expect(plugin.pathMapper.getEffectiveRealPath(mapped)).toBe('/override');
+    });
+
+    it.each(['webdav', 's3', 'sftp'] as const)('preserves a server-relative %s override without local-path warnings', async mountType => {
+        const existing = { ...mount('docs', '/notes'), mountType, deviceOverrides: { desktop: '/etc' } };
+        const { plugin, saveData } = await makePlugin([existing]);
+        const mapped = plugin.pathMapper.getMountByVirtualPath('docs')!;
+
+        expect(plugin.pathMapper.getEffectiveRealPath(mapped)).toBe('/etc');
+        expect(mapped.deviceOverrides).toEqual({ desktop: '/etc' });
+        expect(plugin.settings.allowlist).not.toContain('/etc');
+        expect(vi.mocked(Notice).mock.calls.some(([message]) => String(message).includes('unsafe device path'))).toBe(false);
+        expect(saveData).toHaveBeenLastCalledWith(expect.objectContaining({
+            mountPoints: [expect.objectContaining({ deviceOverrides: { desktop: '/etc' } })],
+        }));
+    });
+
+    it('persists enabled and ignore-list edits from a sanitized data.json mount without losing stored overrides', async () => {
+        const overrides = { desktop: '/etc', laptop: '/other-notes' };
+        const { plugin, saveData } = await makePlugin([{ ...mount('docs'), deviceOverrides: overrides }]);
+        const effective = plugin.settings.mountPoints[0];
+        effective.enabled = false;
+        effective.ignoreList = ['attachments', 'cache'];
+
+        expect(await plugin.persistEditableMountFromState(effective)).toBe(true);
+
+        expect(saveData).toHaveBeenLastCalledWith(expect.objectContaining({
+            mountPoints: [expect.objectContaining({
+                enabled: false, ignoreList: ['attachments', 'cache'], deviceOverrides: overrides,
+            })],
+        }));
+        expect(plugin.settings.mountPoints[0]).toMatchObject({ enabled: false, ignoreList: ['attachments', 'cache'] });
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/primary');
+        expect(persistedOverrides(plugin)).toEqual(overrides);
+    });
+
+    it('writes edits from a sanitized managed-TOC mount while retaining the raw override map', async () => {
+        const overrides = { desktop: '/etc', laptop: '/other-notes' };
+        let document = serializeTocConfig([{ ...mount('docs'), deviceOverrides: overrides }]);
+        vi.mocked(fs.readFile).mockImplementation(() => Promise.resolve(document));
+        vi.mocked(fs.writeFile).mockImplementation((_source, text) => {
+            document = String(text);
+            return Promise.resolve();
+        });
+        const { plugin } = await makePlugin([], '/managed.json');
+        const effective = plugin.settings.mountPoints[0];
+        effective.enabled = false;
+        effective.ignoreList = ['attachments'];
+
+        expect(await plugin.persistEditableMountFromState(effective)).toBe(true);
+
+        expect(JSON.parse(document).mounts).toEqual([expect.objectContaining({
+            enabled: false, ignoreList: ['attachments'], deviceOverrides: overrides,
+        })]);
+        expect(plugin.settings.mountPoints[0]).toMatchObject({ enabled: false, ignoreList: ['attachments'] });
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/primary');
+        await plugin.unbindManagedTocSource();
+        expect(persistedOverrides(plugin)).toEqual(overrides);
+    });
+
+    it.each(['reinject', 'restart watcher'] as const)('uses the safe runtime mount when an edit must %s', async lifecycle => {
+        const existing = { ...mount('docs'), deviceOverrides: { desktop: '/etc' } };
+        const { plugin } = await makePlugin([existing]);
+        const startWatching = vi.fn((active: MountPoint) => {
+            expect(plugin.pathMapper.getEffectiveRealPath(active)).toBe('/primary');
+            expect(active).toBe(plugin.settings.mountPoints[0]);
+        });
+        plugin.fileWatcher = { stopWatching: vi.fn(), startWatching } as unknown as FileWatcher;
+        const effective = plugin.settings.mountPoints[0];
+        expect(effective.deviceOverrides).toEqual({});
+        const newData = lifecycle === 'reinject'
+            ? { ...effective, virtualPath: 'renamed' }
+            : { ...effective, watcherDebounceMs: 250 };
+
+        await plugin.updateMount(existing.id, newData);
+
+        expect(startWatching).toHaveBeenCalledOnce();
+        expect(persistedOverrides(plugin)).toEqual({ desktop: '/etc' });
+    });
+
+    it.each(['update', 'adapter rename'] as const)('preserves raw overrides during a sanitized mount move via %s', async route => {
+        const overrides = { desktop: '/etc', laptop: '/other-notes' };
+        const { plugin, saveData } = await makePlugin([{ ...mount('docs'), deviceOverrides: overrides }]);
+        vi.mocked(plugin.security.validateMount).mockRestore();
+        const effective = plugin.settings.mountPoints[0];
+        expect(effective.deviceOverrides).toEqual({ laptop: '/other-notes' });
+
+        if (route === 'adapter rename') {
+            (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+            await plugin.virtualAdapter!.rename('docs', 'Moved/docs');
+        } else {
+            await plugin.updateMount(effective.id, { ...effective, virtualPath: 'Moved/docs' });
+        }
+
+        expect(persistedOverrides(plugin)).toEqual(overrides);
+        expect(saveData).toHaveBeenLastCalledWith(expect.objectContaining({
+            mountPoints: [expect.objectContaining({ virtualPath: 'Moved/docs', deviceOverrides: overrides })],
+        }));
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/primary');
+        expect(plugin.settings.mountPoints[0].deviceOverrides).toEqual({ laptop: '/other-notes' });
+    });
+
+    it('preserves raw overrides when moving a sanitized managed-TOC mount', async () => {
+        const overrides = { desktop: '/etc', laptop: '/other-notes' };
+        let document = serializeTocConfig([{ ...mount('docs'), deviceOverrides: overrides }]);
+        vi.mocked(fs.readFile).mockImplementation(() => Promise.resolve(document));
+        vi.mocked(fs.writeFile).mockImplementation((_source, text) => {
+            document = String(text);
+            return Promise.resolve();
+        });
+        const { plugin } = await makePlugin([], '/managed.json');
+        const effective = plugin.settings.mountPoints[0];
+        expect(effective.deviceOverrides).toEqual({ laptop: '/other-notes' });
+
+        await plugin.updateMount(effective.id, { ...effective, virtualPath: 'Moved/docs' });
+
+        expect(JSON.parse(document).mounts).toEqual([expect.objectContaining({
+            virtualPath: 'Moved/docs', deviceOverrides: overrides,
+        })]);
+        expect(plugin.settings.mountPoints[0].virtualPath).toBe('Moved/docs');
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/primary');
+        await plugin.unbindManagedTocSource();
+        expect(persistedOverrides(plugin)).toEqual(overrides);
+    });
+
+    it.each<MountPoint['deviceOverrides']>([{ desktop: '/new-root' }, {}, undefined])('explicitly replaces or clears managed-TOC overrides with %j', async deviceOverrides => {
+        let document = serializeTocConfig([{ ...mount('docs'), deviceOverrides: { desktop: '/old-root' } }]);
+        vi.mocked(fs.readFile).mockImplementation(() => Promise.resolve(document));
+        vi.mocked(fs.writeFile).mockImplementation((_source, text) => {
+            document = String(text);
+            return Promise.resolve();
+        });
+        const { plugin } = await makePlugin([], '/managed.json');
+        const effective = plugin.settings.mountPoints[0];
+
+        await plugin.updateMount(effective.id, { ...effective, deviceOverrides }, { replaceDeviceOverrides: true });
+
+        expect(JSON.parse(document).mounts[0].deviceOverrides).toEqual(deviceOverrides);
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe(deviceOverrides?.desktop ?? '/primary');
+    });
+
+    it('validates explicit override changes and preserves other devices when replacing an unsafe active override', async () => {
+        const { plugin } = await makePlugin([{
+            ...mount('docs'), deviceOverrides: { desktop: '/etc', laptop: '/other-notes' },
+        }]);
+        vi.mocked(plugin.security.validateMount).mockRestore();
+
+        await plugin.setDeviceOverride('docs', '/usr');
+        expect(persistedOverrides(plugin)).toEqual({ desktop: '/etc', laptop: '/other-notes' });
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/primary');
+
+        await plugin.setDeviceOverride('docs', '/new-root');
+        expect(persistedOverrides(plugin)).toEqual({ desktop: '/new-root', laptop: '/other-notes' });
+        expect(plugin.pathMapper.getEffectiveRealPath(plugin.settings.mountPoints[0])).toBe('/new-root');
+    });
+
+    it('sanitizes a raw mount passed directly to the injection boundary', async () => {
+        const existing = { ...mount('docs'), deviceOverrides: { desktop: '/etc' } };
+        const { plugin } = await makePlugin([existing]);
+        const starts: string[] = [];
+        plugin.fileWatcher = {
+            stopWatching: vi.fn(),
+            startWatching: (active: MountPoint) => starts.push(plugin.pathMapper.getEffectiveRealPath(active)),
+        } as unknown as FileWatcher;
+
+        await plugin.notifyVaultMountAdded(existing);
+
+        expect(starts).toEqual(['/primary']);
+        expect(existing.deviceOverrides).toEqual({ desktop: '/etc' });
+    });
+
+    describe('remote mount-root trash confirmation', () => {
+        afterEach(() => vi.restoreAllMocks());
+
+        it.each(['webdav', 's3', 'sftp'] as const)('does not offer %s root trash or persist a deletion preference', async mountType => {
+            const { plugin, saveData } = await makePlugin([{ ...mount('docs'), mountType }]);
+            plugin.settings.mountRootDeletionBehavior = 'ask';
+            (plugin as unknown as { installVirtualAdapter(): void }).installVirtualAdapter();
+            saveData.mockClear();
+            const open = vi.spyOn(MountRootDeleteModal.prototype, 'open').mockImplementation(function () {
+                Object.assign(this, { contentEl: new SettingsElement() });
+                this.onOpen();
+                const content = this.contentEl as unknown as SettingsElement;
+                const buttons = content.descendants().filter(element => element.tag === 'button');
+                expect(buttons.map(button => button.text)).toEqual(['Cancel', 'Unmount only']);
+                buttons.find(button => button.text === 'Cancel')!.onclick!();
+            });
+
+            await expect(plugin.virtualAdapter!.trashSystem('docs')).rejects.toThrow('Deletion cancelled');
+            await expect(plugin.virtualAdapter!.trashLocal('docs')).rejects.toThrow('Deletion cancelled');
+
+            expect(open).toHaveBeenCalledTimes(2);
+            expect(plugin.settings.mountRootDeletionBehavior).toBe('ask');
+            expect(saveData).not.toHaveBeenCalled();
+            expect(plugin.settings.mountPoints).toHaveLength(1);
+        });
     });
 });

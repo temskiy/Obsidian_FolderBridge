@@ -5,6 +5,7 @@ import { VirtualAdapter } from './src/VirtualAdapter';
 import { SecurityManager } from './src/SecurityManager';
 import { MountManagerModal, getMountStatus, browseFolderOnDisk, browseMultipleFoldersOnDisk, VaultFolderPickerModal } from './src/ui/MountManagerModal';
 import { MountRootDeleteModal } from './src/ui/MountRootDeleteModal';
+import { SFTPHostKeyModal } from './src/ui/SFTPHostKeyModal';
 import { WelcomeModal } from './src/ui/WelcomeModal';
 import { checkPathAccessible, getPlatform, realPathToResourceUrl, tryReadAsDataUri } from './src/OSHelpers';
 import { FileServer } from './src/FileServer';
@@ -75,6 +76,20 @@ const BUY_ME_COFFEE_URL = 'https://buymeacoffee.com/tescolopio';
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** The adapter refused to create a file because one already exists on the drive. */
+function isAlreadyExistsError(e: unknown): boolean {
+	return (e as NodeJS.ErrnoException | null)?.code === 'EEXIST';
+}
+
+/** Byte-for-byte equality without Node's Buffer (also loads on mobile). */
+function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
+	if (a.byteLength !== b.byteLength) return false;
+	const x = new Uint8Array(a);
+	const y = new Uint8Array(b);
+	for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+	return true;
+}
+
 function generateId(): string {
 	return Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
 }
@@ -95,6 +110,100 @@ function backgroundTask(task: Promise<void>, context: string, pluginName = 'Fold
 // ---------------------------------------------------------------------------
 
 export default class FolderBridgePlugin extends Plugin {
+	private sftpTrustRequests = new Map<string, Promise<void>>();
+	private sftpTrustModals = new Set<SFTPHostKeyModal>();
+	private sftpTrustUnloaded = false;
+	private sftpTrustRevisions = new Map<string, number>();
+	private sftpTrustCancelled = new Set<string>();
+	private reportedSftpTrustErrors = new Map<string, string>();
+
+	private createSFTPAdapter(mount: MountPoint): SFTPAdapter | null {
+		const snapshot = { ...mount };
+		return SFTPAdapter.fromMount(snapshot, async (fingerprint, signal, allowApproval) => {
+			try {
+				await this.verifySFTPHostKey(snapshot, fingerprint, signal, allowApproval);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				logger.warn(`[Folder Bridge] ${message}`);
+				if (this.reportedSftpTrustErrors.get(mount.id) !== message) {
+					this.reportedSftpTrustErrors.set(mount.id, message);
+					new Notice(`Folder Bridge: ${message}`, 10000);
+				}
+				throw error;
+			}
+		});
+	}
+
+	private async verifySFTPHostKey(mount: MountPoint, fingerprint: string, signal: AbortSignal, allowApproval = true): Promise<void> {
+		const revision = this.sftpTrustRevisions.get(mount.id) ?? 0;
+		const endpointMatches = (stored: MountPoint) => stored.mountType === 'sftp'
+			&& stored.sftpHost === mount.sftpHost && (stored.sftpPort ?? 22) === (mount.sftpPort ?? 22);
+		const current = () => {
+			const stored = this.persistedMountPoints.find(entry => entry.id === mount.id);
+			if (signal.aborted || this.sftpTrustUnloaded || !stored || !endpointMatches(stored)
+				|| revision !== (this.sftpTrustRevisions.get(mount.id) ?? 0)) {
+				throw new Error('SFTP trust request is stale. Reconnect the current mount.');
+			}
+			return stored;
+		};
+		const checkPin = (stored: MountPoint): boolean => {
+			if (!stored.sftpHostKeyFingerprint) return false;
+			if (stored.sftpHostKeyFingerprint !== fingerprint) {
+				throw new Error(`SFTP host key for ${mount.sftpHost}:${mount.sftpPort ?? 22} has changed. Expected ${stored.sftpHostKeyFingerprint}; received ${fingerprint}. Connection refused. Verify the change independently before forgetting the saved key.`);
+			}
+			return true;
+		};
+		const key = JSON.stringify([mount.id, mount.sftpHost, mount.sftpPort ?? 22]);
+		const pending = this.sftpTrustRequests.get(key);
+		if (pending) {
+			if (!allowApproval) throw new Error('SFTP host key approval is still pending. Reconnect after approval is saved.');
+			await pending;
+			if (!checkPin(current())) throw new Error('SFTP host key approval was not saved.');
+			return;
+		}
+		if (checkPin(current())) return;
+		if (!allowApproval) throw new Error('SFTP host key approval was reset. Reconnect to verify the server again.');
+		if (this.sftpTrustCancelled.has(key)) throw new Error('SFTP host key approval is paused. Use Reconnect to try again.');
+		const request = (async () => {
+			const accepted = await new Promise<boolean>(resolve => {
+				const modal = new SFTPHostKeyModal(this.app, `${mount.sftpHost}:${mount.sftpPort ?? 22}`, fingerprint, value => {
+					signal.removeEventListener('abort', abort);
+					this.sftpTrustModals.delete(modal);
+					resolve(value);
+				});
+				const abort = () => modal.close();
+				signal.addEventListener('abort', abort, { once: true });
+				this.sftpTrustModals.add(modal);
+				modal.open();
+			});
+			if (!accepted) {
+				this.sftpTrustCancelled.add(key);
+				throw new Error('SFTP host key approval cancelled. No authentication was performed.');
+			}
+			const stored = current();
+			if (checkPin(stored)) return;
+			stored.sftpHostKeyFingerprint = fingerprint;
+			try {
+				await this.saveSettings();
+			} catch (error) {
+				delete stored.sftpHostKeyFingerprint;
+				const latest = this.persistedMountPoints.find(entry => entry.id === mount.id);
+				if (latest && endpointMatches(latest) && latest.sftpHostKeyFingerprint === fingerprint) {
+					delete latest.sftpHostKeyFingerprint;
+				}
+				this.syncEffectiveMountState();
+				throw new Error(`SFTP host key could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			if (!checkPin(current())) throw new Error('SFTP host key approval was reset while saving.');
+			this.syncEffectiveMountState();
+		})();
+		this.sftpTrustRequests.set(key, request);
+		try {
+			await request;
+		} finally {
+			if (this.sftpTrustRequests.get(key) === request) this.sftpTrustRequests.delete(key);
+		}
+	}
 	settings: FolderBridgeSettings;
 	pathMapper: PathMapper;
 	security: SecurityManager;
@@ -381,6 +490,7 @@ export default class FolderBridgePlugin extends Plugin {
 		return { moved: movableMounts.length, skipped };
 	}
 
+	/** Persist UI edits against raw state; device override changes go through updateMount(). */
 	async persistEditableMountFromState(mount: MountPoint): Promise<boolean> {
 		if (!this.isUserEditableMount(mount)) return false;
 
@@ -389,7 +499,8 @@ export default class FolderBridgePlugin extends Plugin {
 			if (managedIndex === -1) return false;
 
 			const nextManagedMounts = this.getManagedTocDraftMounts();
-			const updatedMount = { ...mount };
+			const storedMount = nextManagedMounts[managedIndex];
+			const updatedMount = { ...storedMount, ...mount, deviceOverrides: storedMount.deviceOverrides };
 			delete updatedMount.tocSourcePath;
 			nextManagedMounts[managedIndex] = updatedMount;
 			if (!await this.writeManagedTocMounts(nextManagedMounts)) return false;
@@ -398,6 +509,15 @@ export default class FolderBridgePlugin extends Plugin {
 			return true;
 		}
 
+		const persistedIndex = this.persistedMountPoints.findIndex(existing => existing.id === mount.id);
+		if (persistedIndex === -1) {
+			new Notice(`Folder Bridge: Cannot save "${mount.virtualPath}" because the mount no longer exists.`);
+			return false;
+		}
+		const storedMount = this.persistedMountPoints[persistedIndex];
+		this.persistedMountPoints[persistedIndex] = {
+			...storedMount, ...mount, deviceOverrides: storedMount.deviceOverrides,
+		};
 		await this.saveSettings();
 		this.syncEffectiveMountState();
 		return true;
@@ -419,9 +539,8 @@ export default class FolderBridgePlugin extends Plugin {
 		if (!override) return mount.realPath;
 		// Mounts loaded straight from data.json (e.g. synced from another device)
 		// never pass through validateMount(), so re-check the override here and
-		// refuse to allowlist a protected path.  The mount then fails closed:
-		// PathMapper still resolves to the override, but every guarded read and
-		// write is denied because the path is not on the allowlist.
+		// refuse to allowlist a protected path. syncEffectiveMountState also
+		// removes unsafe overrides from the effective PathMapper view.
 		const validator = this.security ?? new SecurityManager([]);
 		const error = validator.validateDeviceOverrides({ [this.settings.deviceId]: override });
 		if (error) {
@@ -435,12 +554,40 @@ export default class FolderBridgePlugin extends Plugin {
 		return mount.mountType === 'webdav' || mount.mountType === 's3' || mount.mountType === 'sftp';
 	}
 
+	/** Mount ids whose unsafe device override was already reported this session. */
+	private reportedUnsafeOverrides = new Set<string>();
+
+	/**
+	 * Returns the mount without this device's override when that override points
+	 * at a protected path.  Mounts loaded from data.json or a shared TOC file
+	 * never pass through validateMount(), so without this PathMapper would still
+	 * resolve reads, listings and metadata to the protected folder even though
+	 * it is refused an allowlist entry.  Only the effective view is changed; the
+	 * stored mount keeps its override.
+	 */
+	private withSafeDeviceOverride(mount: MountPoint): MountPoint {
+		if (this.isCloudMount(mount)) return mount;
+		const deviceId = this.settings.deviceId;
+		const override = mount.deviceOverrides?.[deviceId];
+		if (!override) return mount;
+		const validator = this.security ?? new SecurityManager([]);
+		const error = validator.validateDeviceOverrides({ [deviceId]: override });
+		if (!error) return mount;
+		if (!this.reportedUnsafeOverrides.has(mount.id)) {
+			this.reportedUnsafeOverrides.add(mount.id);
+			logger.warn(`[FolderBridge] Ignoring device override for mount "${mount.virtualPath}": ${error}`);
+			new Notice(`Folder Bridge: Ignored an unsafe device path for "${mount.virtualPath}" and used the mount's normal path instead.`, 8000);
+		}
+		const remaining = Object.fromEntries(Object.entries(mount.deviceOverrides ?? {}).filter(([id]) => id !== deviceId));
+		return { ...mount, deviceOverrides: remaining };
+	}
+
 	private syncEffectiveMountState(): void {
 		const effectiveMounts = [
 			...this.persistedMountPoints,
 			...this.managedTocMountPoints,
 			...this.externalTocMountPoints,
-		];
+		].map(mount => this.withSafeDeviceOverride(mount));
 		const effectiveAllowlist = Array.from(new Set([
 			...this.persistedAllowlist,
 			...effectiveMounts
@@ -914,7 +1061,7 @@ export default class FolderBridgePlugin extends Plugin {
 							const plain = decryptCredential(mount.encryptedSftpPassphrase);
 							if (plain) saveSessionCredential('sftp-pp', mount.id, plain);
 						}
-						const sftpAdapter = SFTPAdapter.fromMount(mount);
+						const sftpAdapter = this.createSFTPAdapter(mount);
 						if (sftpAdapter) this.virtualAdapter?.setSFTPAdapter(mount.id, sftpAdapter);
 					}
 				}
@@ -959,6 +1106,9 @@ export default class FolderBridgePlugin extends Plugin {
 	}
 
 	onunload() {
+		this.sftpTrustUnloaded = true;
+		for (const modal of this.sftpTrustModals) modal.close();
+		this.sftpTrustModals.clear();
 		this.explorerUnloaded = true;
 		for (const timer of this.explorerTimers) clearTimeout(timer);
 		this.explorerTimers.clear();
@@ -1628,7 +1778,7 @@ export default class FolderBridgePlugin extends Plugin {
 			this.security,
 			this.settings.dryRun,
 			(this.settings.maxDataUriMB ?? 10) * 1024 * 1024,
-			async (mount: MountPoint) => {
+			async (mount: MountPoint, trash = false) => {
 				let action: 'unmount' | 'delete' | 'cancel' = 'cancel';
 
 				if (this.settings.mountRootDeletionBehavior === 'unmount') {
@@ -1649,7 +1799,7 @@ export default class FolderBridgePlugin extends Plugin {
 							} else {
 								resolve(result);
 							}
-						});
+						}, trash, !this.isCloudMount(mount));
 						modal.open();
 					});
 				}
@@ -1723,6 +1873,13 @@ export default class FolderBridgePlugin extends Plugin {
 				await vault.onChange(existing instanceof TFolder ? 'folder-removed' : 'file-removed', normalizedPath, null, null);
 			}
 		);
+		// Lets the adapter tell a create (a path Obsidian doesn't know) from a
+		// save, so creating a note never replaces an existing file on a mount.
+		this.virtualAdapter.getKnownMtime = (normalizedPath: string) => {
+			const file = this.app.vault.getAbstractFileByPath(normalizedPath);
+			return file instanceof TFile ? file.stat.mtime : undefined;
+		};
+		this.virtualAdapter.getConflictMode = () => this.settings.localConflictMode;
 
 		// Wrap with a Proxy so that any undocumented methods on the original
 		// adapter (internal Obsidian APIs) still work transparently.
@@ -1850,6 +2007,9 @@ export default class FolderBridgePlugin extends Plugin {
 			try {
 				await (this.originalVaultCreate as OrigVaultCreate)(path, data, options);
 			} catch (e) {
+				// A file with this name already exists on the drive: the adapter
+				// refused to replace it, and so does Obsidian for a normal vault.
+				if (isAlreadyExistsError(e)) throw e;
 				// Original vault.create() might reject due to a failed filesystem check
 				// against the vault physical directory (the real file is in the mount).
 				// We swallow the error and fall through to manual registration.
@@ -1866,8 +2026,11 @@ export default class FolderBridgePlugin extends Plugin {
 			// native FS watcher (which never fires for paths outside the vault dir).
 			try {
 				await vault.adapter.write(nPath, data, options as DataWriteOptions | undefined);
-			} catch {
+			} catch (e) {
 				// File may already have been written by the failed vault.create() above.
+				// If what's there is NOT this content, it's someone else's file.
+				if (!isAlreadyExistsError(e)) throw e;
+				if (isAlreadyExistsError(e) && (await vault.adapter.read(nPath).catch(() => null)) !== data) throw e;
 			}
 			const stat = await vault.adapter.stat(nPath);
 			if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(nPath)) {
@@ -1886,6 +2049,7 @@ export default class FolderBridgePlugin extends Plugin {
 			try {
 				await (this.originalVaultCreateBinary as OrigVaultCreateBinary)(path, data, options);
 			} catch (e) {
+				if (isAlreadyExistsError(e)) throw e;
 				logger.debug('[Folder Bridge] vault.createBinary() rejected for virtual path, using manual registration:', e);
 			}
 
@@ -1895,8 +2059,14 @@ export default class FolderBridgePlugin extends Plugin {
 
 			try {
 				await vault.adapter.writeBinary(nPath, data, options as DataWriteOptions | undefined);
-			} catch {
+			} catch (e) {
 				// File may already have been written by the failed vault.createBinary().
+				// If what's there is NOT this content, it's someone else's file.
+				if (!isAlreadyExistsError(e)) throw e;
+				if (isAlreadyExistsError(e)) {
+					const onDisk = await vault.adapter.readBinary(nPath).catch(() => null);
+					if (!onDisk || !sameBytes(onDisk, data)) throw e;
+				}
 			}
 			const stat = await vault.adapter.stat(nPath);
 			if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(nPath)) {
@@ -2015,7 +2185,7 @@ export default class FolderBridgePlugin extends Plugin {
 					await this.saveSettings();
 				}
 			}
-			const sftpAdapter = SFTPAdapter.fromMount(mount);
+			const sftpAdapter = this.createSFTPAdapter(mount);
 			if (sftpAdapter) this.virtualAdapter?.setSFTPAdapter(mount.id, sftpAdapter);
 		}
 
@@ -2166,12 +2336,12 @@ export default class FolderBridgePlugin extends Plugin {
 		await this.updateMount(id, {
 			...mount,
 			deviceOverrides: { ...mount.deviceOverrides, [this.settings.deviceId]: overridePath },
-		});
+		}, { replaceDeviceOverrides: true });
 	}
 
-	async updateMount(id: string, newData: Omit<MountPoint, 'id'>): Promise<void> {
+	async updateMount(id: string, newData: Omit<MountPoint, 'id'>, options: { replaceDeviceOverrides?: boolean } = {}): Promise<void> {
 		const previous = this.mountUpdates.get(id) ?? Promise.resolve();
-		const update = previous.catch(() => { }).then(() => this.updateMountState(id, newData));
+		const update = previous.catch(() => { }).then(() => this.updateMountState(id, newData, options.replaceDeviceOverrides === true));
 		this.mountUpdates.set(id, update);
 		try {
 			await update;
@@ -2180,15 +2350,40 @@ export default class FolderBridgePlugin extends Plugin {
 		}
 	}
 
-	private async updateMountState(id: string, newData: Omit<MountPoint, 'id'>): Promise<void> {
+	private async updateMountState(id: string, newData: Omit<MountPoint, 'id'>, replaceDeviceOverrides: boolean): Promise<void> {
 		const idx = this.persistedMountPoints.findIndex(m => m.id === id);
+		const storedMount = idx === -1
+			? this.managedTocMountPoints.find(mount => mount.id === id)
+			: this.persistedMountPoints[idx];
+		if (!storedMount) return;
+		const forgetSftpHostKey = newData.sftpForgetHostKey === true;
+		const endpointChanged = storedMount.sftpHost !== newData.sftpHost
+			|| (storedMount.sftpPort ?? 22) !== (newData.sftpPort ?? 22);
+		const mountData = { ...newData };
+		delete mountData.sftpForgetHostKey;
+		if (forgetSftpHostKey || endpointChanged || newData.mountType !== storedMount.mountType) {
+			this.sftpTrustRevisions.set(id, (this.sftpTrustRevisions.get(id) ?? 0) + 1);
+			this.sftpTrustCancelled.delete(JSON.stringify([id, newData.sftpHost, newData.sftpPort ?? 22]));
+		}
+		newData = {
+			...mountData,
+			sftpHostKeyFingerprint: forgetSftpHostKey || endpointChanged || newData.mountType !== 'sftp'
+				? undefined : storedMount.sftpHostKeyFingerprint,
+		};
+
+		// Ordinary edits can originate from a sanitized runtime mount, not its raw override map.
+		newData = {
+			...newData,
+			deviceOverrides: replaceDeviceOverrides ? newData.deviceOverrides : storedMount.deviceOverrides,
+		};
+		const validationData = replaceDeviceOverrides ? newData : { ...newData, deviceOverrides: undefined };
 		if (idx === -1) {
 			const managedIndex = this.getManagedTocIndex(id);
 			if (managedIndex === -1) return;
 
 			const oldMount = this.managedTocMountPoints[managedIndex];
 			const otherMounts = this.settings.mountPoints.filter(m => m.id !== id);
-			const error = this.security.validateMount(newData, otherMounts);
+			const error = this.security.validateMount(validationData, otherMounts);
 			if (error) {
 				new Notice(`Folder Bridge: ${error}`);
 				return;
@@ -2252,7 +2447,7 @@ export default class FolderBridgePlugin extends Plugin {
 
 		// Validate against all OTHER mounts (exclude the one being edited)
 		const otherMounts = this.settings.mountPoints.filter(m => m.id !== id);
-		const error = this.security.validateMount(newData, otherMounts);
+		const error = this.security.validateMount(validationData, otherMounts);
 		if (error) {
 			new Notice(`Folder Bridge: ${error}`);
 			return;
@@ -2315,7 +2510,10 @@ export default class FolderBridgePlugin extends Plugin {
 		this.syncEffectiveMountState();
 		this.updateStatusBar();
 
-		const updatedMount = this.persistedMountPoints[idx];
+		const updatedMount = this.settings.mountPoints.find(existing => existing.id === id);
+		if (!updatedMount) {
+			throw new Error(`Folder Bridge: Updated mount "${id}" is missing from the runtime state.`);
+		}
 
 		// Recreate adapters when mount type or credentials change
 		if (updatedMount.mountType === 'webdav') {
@@ -2373,7 +2571,7 @@ export default class FolderBridgePlugin extends Plugin {
 				}
 			}
 			this.virtualAdapter?.clearSFTPAdapter(id);
-			const sftpAdapter = SFTPAdapter.fromMount(updatedMount);
+			const sftpAdapter = this.createSFTPAdapter(updatedMount);
 			if (sftpAdapter) this.virtualAdapter?.setSFTPAdapter(id, sftpAdapter);
 		} else if (oldMount.mountType === 'sftp') {
 			this.virtualAdapter?.clearSFTPAdapter(id);
@@ -2420,6 +2618,7 @@ export default class FolderBridgePlugin extends Plugin {
 	 * as a folder and inserts it into its internal TFolder tree.
 	 */
 	async notifyVaultMountAdded(mount: MountPoint): Promise<void> {
+		mount = this.withSafeDeviceOverride(mount);
 		const token = Symbol();
 		this.mountInjections.set(mount.id, token);
 		const isCurrent = () => this.mountInjections.get(mount.id) === token;
@@ -2660,8 +2859,14 @@ export default class FolderBridgePlugin extends Plugin {
 						const s3 = S3Adapter.fromMount(mount);
 						if (s3) reachable = (await s3.testConnection()) === null;
 					} else if (mount.mountType === 'sftp') {
-						const sftpAdapter = SFTPAdapter.fromMount(mount);
-						if (sftpAdapter) reachable = (await sftpAdapter.testConnection()) === null;
+						const sftpAdapter = this.createSFTPAdapter(mount);
+						if (sftpAdapter) {
+							try {
+								reachable = (await sftpAdapter.testConnection()) === null;
+							} finally {
+								await sftpAdapter.disconnect();
+							}
+						}
 					} else {
 						// Local mounts require Node.js fs — unavailable on mobile
 						if (fs && fs.promises) {
@@ -2704,6 +2909,8 @@ export default class FolderBridgePlugin extends Plugin {
 	 * Called from the settings tab "Reconnect" button.
 	 */
 	async reconnectMount(mount: MountPoint): Promise<void> {
+		this.sftpTrustCancelled.delete(JSON.stringify([mount.id, mount.sftpHost, mount.sftpPort ?? 22]));
+		this.reportedSftpTrustErrors.delete(mount.id);
 		let reachable = false;
 		try {
 			if (mount.mountType === 'webdav') {
@@ -2713,8 +2920,14 @@ export default class FolderBridgePlugin extends Plugin {
 				const s3 = S3Adapter.fromMount(mount);
 				if (s3) reachable = (await s3.testConnection()) === null;
 			} else if (mount.mountType === 'sftp') {
-				const sftpAdapter = SFTPAdapter.fromMount(mount);
-				if (sftpAdapter) reachable = (await sftpAdapter.testConnection()) === null;
+				const sftpAdapter = this.createSFTPAdapter(mount);
+				if (sftpAdapter) {
+					try {
+						reachable = (await sftpAdapter.testConnection()) === null;
+					} finally {
+						await sftpAdapter.disconnect();
+					}
+				}
 			} else {
 				if (fs && fs.promises) {
 					await this.resolveMountPath(mount);
@@ -2804,6 +3017,10 @@ export default class FolderBridgePlugin extends Plugin {
 	async loadSettings() {
 		const data = await this.loadData() as Record<string, unknown>;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+		if (this.settings.localConflictMode !== 'copy' && this.settings.localConflictMode !== 'overwrite') {
+			logger.warn('[FolderBridge] Unsupported local conflict mode; using recovery copies instead of automatic merging or overwrite.');
+			this.settings.localConflictMode = 'copy';
+		}
 		this.settings.managedTocSource = this.settings.managedTocSource ?? '';
 		this.settings.managedTocSourceFallback = this.settings.managedTocSourceFallback ?? '';
 		this.settings.explorerExpansionState = {
@@ -2855,6 +3072,7 @@ export default class FolderBridgePlugin extends Plugin {
 				delete rest.s3SecretKey;
 				delete rest.sftpPassword;
 				delete rest.sftpPassphrase;
+				delete rest.sftpForgetHostKey;
 				delete rest.tocSourcePath;
 				return rest;
 			}),
@@ -2961,11 +3179,11 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Mount root deletion behavior')
-			.setDesc('What should happen when you delete a mounted folder from the file explorer?')
+			.setDesc('Choose whether to unmount or delete the real folder. Real deletion follows Obsidian\'s selected trash or permanent-delete mode.')
 			.addDropdown(drop => drop
 				.addOption('ask', 'Ask me every time')
 				.addOption('unmount', 'Unmount only (keep real files)')
-				.addOption('delete', 'Delete permanently (destroy real files)')
+				.addOption('delete', 'Delete real folder using the selected deletion mode')
 				.setValue(this.plugin.settings.mountRootDeletionBehavior)
 				.onChange((val: 'ask' | 'unmount' | 'delete') => {
 					void (async () => {
@@ -3019,6 +3237,19 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 							.setButtonText(`☕ Buy ${buyMe}`)
 							.setTooltip('Support development with a coffee')
 							.onClick(() => openExternalUrl(BUY_ME_COFFEE_URL)));
+				}));
+
+		new Setting(containerEl)
+			.setName('Changes on the drive before saving')
+			.setDesc('For local mounts, keep a conflict copy in the vault trash before saving over changed or unverified content. Automatic merging is not available. Temporary save-recovery copies are required in either mode.')
+			.addDropdown(dropdown => dropdown
+				.addOption('copy', 'Keep a conflict copy (recommended)')
+				.addOption('overwrite', 'Overwrite without a conflict copy')
+				.setValue(this.plugin.settings.localConflictMode)
+				.onChange(value => {
+					if (value !== 'copy' && value !== 'overwrite') throw new Error(`Unsupported local conflict mode: ${value}`);
+					this.plugin.settings.localConflictMode = value;
+					void this.plugin.saveSettings();
 				}));
 
 		// ── Ignore Lists ─────────────────────────────────────────────────

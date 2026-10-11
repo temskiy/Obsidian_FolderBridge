@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Local test candidate: **2.15.5-rc.5**, based on published rc.4 plus the combined
+S3 #57/#68 changes. This candidate is not a published release or stable promotion.
+
+### Fixed
+- Make production native-addon stubs fail during module loading so SSH falls back to its working JavaScript cipher implementation (#78). Production-bundle regressions exercise actual AES-GCM and CTR handshakes.
+- Refuse mounted creates that would replace an existing, unindexed file (#80); manual text/binary creation fallbacks propagate disk and permission failures.
+- Decode UTF-16 BOM and Windows-1252 notes for reading, but refuse text saves/appends that would silently convert their encoding (#79). Every text save checks current disk bytes and refuses unreadable checks.
+- Before overwriting an existing non-empty local file, require a recovery copy in `<vault>/.trash/folderbridge-saving/save-<unique>/<original-name>` (#81). Failed copy/inspection refuses the save; failed writes retain the previous version and report its path. Successful writes remain in place and remove the temporary recovery copy.
+- Adapt #82 to keep conflict copies by default in `<vault>/.trash/folderbridge-conflicts/conflict-<unique>/<original-name>`. Content fingerprints detect changes even when modification time and size are unchanged; unverified versions are copied conservatively. Explicit overwrite remains an option, but still requires temporary save recovery. Automatic merging and editor reloads are deferred.
+- Serialize local saves, appends and `process` transformations per resolved path; recheck mount routing and write permissions when queued work starts.
+- Apply S3 mount prefixes exactly once to server paths, including active cloud device overrides. Bucket-root mounts retain their existing key mapping.
+- URL-encode S3 copy/rename source key segments, including spaces, Unicode, percent signs and reserved characters, while retaining slash separators and literal destination keys. File and paginated folder copies share the same encoding helper.
+
+### Migration And Testing
+- These additional save-safety changes are integration work, not yet installed in the earlier local rc.5 build or published assets. Back up sources before testing. Temporary safety copies are not persistent version history and do not prevent concurrent external writers from changing a file during a save.
+- Conflict copies are retained after successful saves for manual review; copy them back only after pausing writers. There is no automatic retention cleanup. Fingerprints are bounded to 512 recently observed paths per session; an evicted/unread/rerouted path gets a conservative copy on its next overwrite. Later reads alone do not replace the older baseline, so extra copies are possible. This is not atomic protection against other processes writing during the check/copy/write window.
+- Existing non-root S3 mounts previously addressed doubled keys such as `notes/notes/a.md`. They now address `notes/a.md`. Old objects are not moved or deleted; they may appear under an extra nested folder rather than their former virtual location. Inspect the bucket with a provider tool and back up/copy objects before any explicit migration. Do not overwrite an existing corrected key.
+- This does not fix recursive S3 folder deletion or make copy/rename atomic. Failed folder copies can leave partial destination copies; source objects are retained. Do not use valuable data for failure tests.
+- Use the [Windows cumulative test checklist](docs/WINDOWS_TEST_CHECKLIST.md) for the local candidate. The published rc.4 SFTP release is unchanged, and native/live-provider results remain pending.
+
+## [2.15.5-rc.4] - 2026-10-03
+
+This opt-in SFTP identity-verification test release builds on rc.3. It addresses
+the host-key concern in #60 / #63 with explicit approval rather than silent
+first-use trust. It is not stable promotion or confirmation that the original
+reports are fully resolved. Stable 2.15.4 remains latest.
+
+### Changed
+- SFTP connections require approval of the server's OpenSSH-style SHA-256 fingerprint before authentication, including existing mounts without a saved key. Approval must be saved successfully; later changed keys are refused rather than silently replaced.
+- SFTP trust is bound to the mount's host and port. Endpoint changes, transport changes and an explicit "Forget host key on save" reset require approval again. Ordinary edits retain trust. Verify new or changed keys independently with the server administrator.
+- Cancelled approval pauses further prompts until Reconnect. Concurrent connections share approval; stale/cancelled connection approvals cannot authorize authentication. Background probes close their temporary connections.
+- Close a credential-free key-discovery connection before asking for approval, keeping human verification outside the SSH handshake timeout. A fresh bounded connection must present that same approved key before authentication; changed keys or revoked/pending trust refuse the connection without another prompt.
+
+### Upgrade And Test Notes
+- Back up settings and mounted sources. Install `main.js`, `manifest.json` and `styles.css` from rc.4 together in a disposable desktop vault; existing rc.2/rc.3 tags and assets are not replaced.
+- Existing SFTP mounts without saved trust now require fingerprint approval. Independently compare the displayed key with the administrator over a trusted channel before selecting "Trust verified key". Imported/synced fingerprints are trust configuration, not independent identity verification.
+- Leave the first approval dialog open for at least 30 seconds, then approve and open a copied note. Also test cancel/Reconnect, restart persistence, host/port edits, explicit reset and changed-key refusal on a disposable server. An approved key remains saved if later credential authentication fails.
+- Record the build, OS, Obsidian version, actual wait time and redacted evidence in [native test row 19](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.4/docs/NATIVE_TEST_RESULTS.md). Native Obsidian and administrator-managed SSH results are still pending.
+
+### Validation And Known Limitations
+- Local Windows lint, UI text checks, TypeScript and redirected production bundling pass. All 35 added SFTP tests pass, including seven real disposable loopback SSH tests covering a 21-second approval wait, zero authentication before approval/refusal, changed keys between phases, cancellation/retry and bounded discovery/authentication timeout recovery.
+- The Windows full suite reports 592 passed and the same four pre-existing path-separator expectation failures, 596 total across 19 files. One existing lint warning remains. Publication requires the complete Ubuntu/Node 20 PR and release validation gates; local tests are not evidence of native compatibility.
+- All [rc.3 limitations](https://github.com/tescolopio/Obsidian_FolderBridge/releases/tag/2.15.5-rc.3) remain except that this candidate now includes SFTP host-key trust. S3 prefix/copy fixes (#57/#68), dependency advisories, the whole-drive descendant-access policy and broader native validation remain outstanding. Remote recoverable trash remains unsupported.
+- SFTP remains desktop-only. Dependencies and minimum Obsidian version are unchanged. Stable promotion still requires the [remaining release gates](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.4/docs/NEXT_RELEASE.md).
+
+## [2.15.5-rc.3] - 2026-10-03
+
+This opt-in prerelease follows up on the two review findings from #73, fixed in
+#74. It retains the rc.2 safety work and does not promote a stable release.
+Stable 2.15.4 remains latest. Back up settings, the vault and mounted sources;
+test with a disposable vault and copied files.
+
+### Fixed
+- Preserve raw device overrides during ordinary mount edits and moves, including sanitized runtime mounts and managed TOC mounts. Override replacement or clearing now requires an explicit update option.
+- Omit the unsupported trash action for remote mount roots, preventing a failed remote-trash attempt from saving "Don't ask again" for future permanent deletions. Unmount and explicit permanent deletion remain available.
+
+### Upgrade Notes
+- Existing saved root-deletion choices are preserved. If a failed remote-trash attempt in rc.2 saved an unintended deletion preference, review "Mount root deletion behavior" in settings and restore confirmation before further deletion tests.
+- Install `main.js`, `manifest.json` and `styles.css` from rc.3 together. Existing rc.2 tags and assets are not replaced.
+
+### Validation And Known Limitations
+- #74 PR and merged-main Ubuntu/Node 20 CI pass all 561 tests across 17 files, plus lint, UI text checks, TypeScript and production bundling. The local Windows full gate reports 557 passed and the same 4 pre-existing path-expectation failures. One pre-existing lint warning remains.
+- Automated coverage adds 15 regressions for sanitized moves, stored/managed-TOC override preservation, explicit replacement/clearing and remote root-trash choices. Automated tests mock Obsidian; no native host, Android, live backend or physical cross-volume result was added.
+- All [rc.2 limitations](https://github.com/tescolopio/Obsidian_FolderBridge/releases/tag/2.15.5-rc.2) remain: native trash/restore/save compatibility is pending; cross-volume copy/remove is not atomic against external writers; remote recoverable trash is unsupported; permanent backend deletion limitations remain.
+- SFTP host-key trust (#60), S3 prefix/copy fixes (#57/#68), security policy (#71) and the whole-drive descendant-access policy are not included. Whole-drive mounts remain supported; path-access hardening is not complete.
+- Dependency audit remains at 2 high production affected-package entries in the braces/chokidar advisory chain, plus 3 moderate development entries. Dependencies and minimum host version are unchanged.
+- WebDAV remains unavailable on Android; S3/B2 mobile access and the suppressed-startup fix need native confirmation. BRAT/manual installation does not establish community-directory approval. Stable promotion still requires the [remaining release gates](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.3/docs/NEXT_RELEASE.md).
+
+## [2.15.5-rc.2] - 2026-10-03
+
+This opt-in prerelease adds source-file safety and path-hardening changes on top
+of 2.15.5-rc.1. Stable 2.15.4 remains the latest stable release. Back up settings,
+the vault and mounted sources; test only in disposable vaults with copied files.
+The maintainer approved this candidate with the limitations below disclosed,
+not as stable promotion. See the [release outline](docs/NEXT_RELEASE.md).
+
+### Fixed
+- Reject traversal segments in file-server requests (#55).
+- Abort remote append when the read fails for reasons other than a missing file, instead of overwriting existing contents (#56).
+- Validate local device overrides and remove unsafe overrides from this device's effective mount routing while preserving stored settings (#58, #70). Remote server-relative overrides remain unchanged. Enabled/ignore-list edits preserve the raw override map in data.json and managed TOC files; watcher reinjection and restart use safe runtime mounts.
+- Refuse additional system and credential paths during mount validation, including the exact macOS `/private` parent, its protected descendants, and Windows system directories on other drives (#69). Whole-drive mounts remain supported; the any-drive root ancestor gap is unresolved pending a descendant-access policy.
+- Keep local and vault-mounted trash recoverable in the current vault's `.trash/folderbridge-<unique>/<original-name>`. Each deletion reserves its own recovery folder, preventing collisions between concurrent deletions. Cross-volume copies remove the source only after copying succeeds; failures report the recovery location (#59).
+- Return `false` when system trash fails or is unavailable so Obsidian can use its local-trash fallback. Root confirmation is reused only briefly and for the same effective source path.
+- Describe trash versus permanent deletion correctly in the mount-root confirmation.
+
+### Changed
+- WebDAV, S3 and SFTP trash requests now fail explicitly without deleting remote data. Explicit permanent-delete operations remain available. Remote download-to-trash recovery is not implemented.
+- Make lint and UI-copy validation paths portable on Windows. Production builds can set `FOLDERBRIDGE_BUILD_OUTFILE` to validate without overwriting an installed plugin.
+
+### Validation And Known Limitations
+- Local Windows lint, UI text checks, TypeScript checking and production bundling pass. The final full run reports 542 passed and 4 failed out of 546 tests across 17 files. All four Windows path-expectation failures also reproduce on unchanged main. The merged candidate must pass the complete Ubuntu/Node 20 CI gate before tagging; automated checks mock Obsidian and do not establish native compatibility.
+- Native Obsidian trash fallback, restore, external-edit/save, Windows/WSL, macOS, Android and current/oldest host checks remain pending. Cross-volume unit tests inject `EXDEV`; no physical cross-volume test was performed. Pause external writers during copy-then-remove operations.
+- Local recovery entries are `.trash/folderbridge-<unique>/<original-name>` in the current vault. Restore by copying back to the original source. Failed copies preserve the source and can retain partial recovery data; failed source removal retains the completed recovery copy and reports the recovery location.
+- WebDAV/S3/SFTP recoverable trash is intentionally unavailable. Explicit permanent deletion is unchanged and still has backend-specific limitations, including non-recursive S3 folder removal.
+- Whole-drive mounts remain supported. A non-C root such as `D:\` can still expose protected descendants; that review comment remains unresolved pending a descendant-access policy. Primary/fallback paths loaded from existing settings, manual allowlists, symlink containment and unguarded metadata/path methods also need further review. This is not complete security hardening.
+- SFTP host-key verification (#60), S3 non-root-prefix correction (#57), S3 copy/rename encoding (#68) and the security policy (#71) are not included.
+- Current dependency audit reports 2 high production affected-package entries (`braces`/`chokidar`, the same advisory chain) and 3 moderate development affected-package entries via `moment`/Obsidian tooling. They remain unresolved; this release does not claim a clean dependency audit.
+- Inherited Android loading and suppressed-startup fixes remain unconfirmed on native devices. WebDAV is unavailable on Android in this candidate; S3/B2 mobile access is untested. Suppressed startup emits one burst of create events, so test with attachment-management plugins.
+- Install `main.js`, `manifest.json` and `styles.css` from this candidate together. Keep #16, #18, #61, #62 and #63 open pending the remaining work and results. BRAT/manual availability is not community-directory approval.
+
 ## [2.15.5-rc.1] - 2026-09-20
 
 This opt-in prerelease adds two fixes on top of stable 2.15.4, which remains the
