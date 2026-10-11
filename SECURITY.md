@@ -16,7 +16,8 @@ GitHub's private vulnerability reporting:
 2. Choose **Report a vulnerability**, or go straight to
    [the report form](https://github.com/tescolopio/Obsidian_FolderBridge/security/advisories/new).
 
-Only the maintainers can see the report until it is resolved.
+Reports remain private to the reporter, maintainers and explicitly invited
+collaborators until an advisory is published.
 
 ### What helps
 
