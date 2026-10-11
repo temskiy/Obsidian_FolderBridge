@@ -1879,6 +1879,7 @@ export default class FolderBridgePlugin extends Plugin {
 			const file = this.app.vault.getAbstractFileByPath(normalizedPath);
 			return file instanceof TFile ? file.stat.mtime : undefined;
 		};
+		this.virtualAdapter.getConflictMode = () => this.settings.localConflictMode;
 
 		// Wrap with a Proxy so that any undocumented methods on the original
 		// adapter (internal Obsidian APIs) still work transparently.
@@ -3016,6 +3017,10 @@ export default class FolderBridgePlugin extends Plugin {
 	async loadSettings() {
 		const data = await this.loadData() as Record<string, unknown>;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+		if (this.settings.localConflictMode !== 'copy' && this.settings.localConflictMode !== 'overwrite') {
+			logger.warn('[FolderBridge] Unsupported local conflict mode; using recovery copies instead of automatic merging or overwrite.');
+			this.settings.localConflictMode = 'copy';
+		}
 		this.settings.managedTocSource = this.settings.managedTocSource ?? '';
 		this.settings.managedTocSourceFallback = this.settings.managedTocSourceFallback ?? '';
 		this.settings.explorerExpansionState = {
@@ -3232,6 +3237,19 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 							.setButtonText(`☕ Buy ${buyMe}`)
 							.setTooltip('Support development with a coffee')
 							.onClick(() => openExternalUrl(BUY_ME_COFFEE_URL)));
+				}));
+
+		new Setting(containerEl)
+			.setName('Changes on the drive before saving')
+			.setDesc('For local mounts, keep a conflict copy in the vault trash before saving over changed or unverified content. Automatic merging is not available. Temporary save-recovery copies are required in either mode.')
+			.addDropdown(dropdown => dropdown
+				.addOption('copy', 'Keep a conflict copy (recommended)')
+				.addOption('overwrite', 'Overwrite without a conflict copy')
+				.setValue(this.plugin.settings.localConflictMode)
+				.onChange(value => {
+					if (value !== 'copy' && value !== 'overwrite') throw new Error(`Unsupported local conflict mode: ${value}`);
+					this.plugin.settings.localConflictMode = value;
+					void this.plugin.saveSettings();
 				}));
 
 		// ── Ignore Lists ─────────────────────────────────────────────────

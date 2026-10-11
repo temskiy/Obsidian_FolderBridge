@@ -340,6 +340,35 @@ Prevent any write operations through a specific mount (useful for reference fold
 
 ---
 
+### Local Save Safety (Unpublished Integration)
+
+The save-safety integration branch builds on rc.5; the earlier installed rc.5
+candidate and published rc.4 assets do not contain these additional changes.
+
+- Creating a new mounted file refuses to replace an existing, unindexed file.
+- Windows-1252 and BOM-marked UTF-16 notes can be read, but text saving/appending
+  refuses to silently convert them. Convert a copy to UTF-8 externally first.
+- Overwriting a non-empty local file requires a temporary recovery copy under
+  `<vault>/.trash/folderbridge-saving/save-<unique>/<original-name>`.
+  A failed backup refuses the save. A failed write retains the old version and
+  reports its recovery path; a successful save removes the temporary copy.
+- **Changes on the drive before saving** defaults to **Keep a conflict copy**.
+  Changed or unverified versions are retained under
+  `<vault>/.trash/folderbridge-conflicts/conflict-<unique>/<original-name>`.
+  Content fingerprints also detect equal-size changes with unchanged timestamps.
+  Automatic merging and editor reload are not enabled. The explicit overwrite
+  option skips conflict copies, but not required temporary recovery copies.
+- An unread file, changed mount route, evicted fingerprint or background read
+  can lead to a conservative extra conflict copy. Copies are retained for
+  manual review with no automatic cleanup. Stop writers before restoring.
+
+Local save/append/process operations are serialized per resolved path. This is
+not an atomic lock against other programs, sync tools or SMB clients, and does
+not replace backups or version history. Validate on disposable data using the
+[Windows checklist](docs/WINDOWS_TEST_CHECKLIST.md).
+
+---
+
 ### Ignore List
 
 Hide specific files or folders inside a mount from Obsidian. Useful for large directories (`node_modules`, build outputs) that would slow down indexing.

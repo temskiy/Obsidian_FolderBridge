@@ -18,12 +18,25 @@ overwritten. The maintainer chose refusal, not best-effort overwrite, when
 backup creation fails. Recovery files are reserved in unique directories under
 `<vault>/.trash/folderbridge-saving/`; failed writes name the retained copy.
 
-#82 remains a separate integration step: copy is the chosen default, and
-automatic merging/editor reload is deferred. None of these branch changes
+#82 is adapted with copy as the default, while automatic merging/editor reload
+is deferred. Conflict copies are retained under
+`<vault>/.trash/folderbridge-conflicts/conflict-<unique>/`; content fingerprints
+detect same-time/same-size changes, and absent baselines copy conservatively.
+An explicit overwrite setting skips conflict copies but not temporary safety
+copies. Saves, appends and local `process` calls share a per-path queue.
+None of these branch changes
 update the installed local rc.5 runtime or authorize another public release.
 Native Windows/SMB tests, CI validation and fresh shutdown confirmation remain
 required before local installation. Recovery copies do not make external
 writer races atomic or provide permanent version history.
+
+Windows validation for this integration: `npm run lint` passed with the one
+existing sentence-case warning; `npm run check:ui-text` passed; redirected
+`npm run build` passed, including TypeScript. `npm test` reported 665 passed
+and the same four Windows separator-expectation failures, 669 total across
+23 files. Byte-returning mocks for the new disk checks preserve those existing
+test cases' original behavior. Ubuntu/Node 20 CI must pass before integration.
+These automated results are not native Obsidian/SMB evidence.
 
 ## Goal And Release Sequence
 

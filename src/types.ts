@@ -4,6 +4,7 @@
  */
 export type MountType = 'local' | 'webdav' | 'vault' | 's3' | 'sftp';
 export type MountVisibleFileFilter = 'all' | 'markdown-only' | 'pdf-only';
+export type LocalConflictMode = 'copy' | 'overwrite';
 
 export interface MountPoint {
 	id: string;            // Unique identifier (generated at creation)
@@ -136,6 +137,7 @@ export interface FolderBridgeSettings {
 	dryRun: boolean;        // Log writes without executing them
 	showStatusBar: boolean;
 	mountRootDeletionBehavior: 'ask' | 'unmount' | 'delete';
+	localConflictMode: LocalConflictMode;
 	deviceId: string;       // Unique ID for this specific device
 	allowForeignMounts: boolean; // Allow mounting paths created on other devices
 	/** Maximum size (in MB) of files that will be served as data: URIs (images, PDFs). */
@@ -164,6 +166,7 @@ export const DEFAULT_SETTINGS: FolderBridgeSettings = {
 	dryRun: false,
 	showStatusBar: true,
 	mountRootDeletionBehavior: 'ask',
+	localConflictMode: 'copy',
 	deviceId: '',
 	allowForeignMounts: false,
 	maxDataUriMB: 10,

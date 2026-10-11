@@ -37,6 +37,25 @@ Do not claim a pass until the installation report identifies the newer bundle.
 - [ ] Verify creation, ordinary save and `vault.process` behavior with the
   third-party plugins you normally use. Record errors rather than dismissing
   them; no native compatibility result is implied by passing unit tests.
+- [ ] Conflict default: read a copied note in Obsidian, then modify it in a
+  second program with watcher events suppressed. Save your Obsidian draft.
+  Your draft should be saved and the other version retained under
+  `.trash/folderbridge-conflicts/conflict-<unique>/<original-name>`, with a
+  notice giving the path. There must be no automatic merge or editor reload.
+- [ ] Repeat conflict saving with equal-length external edits and binary
+  files. Open a retained copy and verify its exact bytes, not just its name.
+- [ ] Save twice quickly without external edits; no conflict copy should be
+  generated from the plugin's own previous save. A first save without a read
+  baseline may conservatively generate a copy.
+- [ ] Deny access to the disposable conflict-copy folder and repeat a conflict
+  save. It must refuse and leave the external version unchanged.
+- [ ] Only on disposable data, choose **Overwrite without a conflict copy**
+  under **Changes on the drive before saving**. Confirm no retained conflict
+  copy is made, but a failed required temporary safety copy still refuses
+  the save. Restore the recommended copy mode afterward.
+- [ ] Keep both drafts after any disagreement, pause writers and restore
+  manually. Conflict copies are retained, not auto-cleaned; these checks do
+  not prove atomic exclusion of concurrent SMB/external writers.
 
 Record the installed bundle SHA-256 and backup directory from the local
 installation report. Version alone is not enough to identify an unpublished
