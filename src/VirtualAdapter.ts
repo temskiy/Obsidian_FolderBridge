@@ -657,20 +657,45 @@ export class VirtualAdapter {
 	// write / writeBinary / append / process
 	// ------------------------------------------------------------------
 
-	/**
-	 * Write a file on a local mount. A file Obsidian doesn't know yet is
-	 * created with the "wx" flag, so vault.create() can never replace a file
-	 * someone else put on the drive (a colleague's note with the same name, or
-	 * one the watcher hasn't reported yet). That case throws an EEXIST error.
-	 */
+	/** Reserve a recovery directory before overwriting an existing non-empty file. */
+	private async makeSafetyCopy(realPath: string): Promise<string | null> {
+		try {
+			const current = await fs.promises.stat(realPath);
+			if (!current.isFile()) throw new Error('the destination is not a regular file');
+			if (current.size === 0) return null;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+			throw new Error(`Folder Bridge: Save refused because the original file could not be checked: ${String(error)}`);
+		}
+		let recoveryDir: string | undefined;
+		try {
+			const basePath = (this.orig() as DataAdapter & { getBasePath?(): string }).getBasePath?.();
+			if (!basePath) throw new Error('the vault folder could not be located');
+			const directory = path.join(basePath, '.trash', 'folderbridge-saving');
+			await fs.promises.mkdir(directory, { recursive: true });
+			recoveryDir = await fs.promises.mkdtemp(path.join(directory, 'save-'));
+			const copy = path.join(recoveryDir, path.basename(realPath));
+			await fs.promises.copyFile(realPath, copy, fs.constants.COPYFILE_EXCL);
+			return copy;
+		} catch (error) {
+			const recovery = recoveryDir ? ` Inspect the incomplete recovery copy at "${recoveryDir}".` : '';
+			throw new Error(`Folder Bridge: Save refused because a safety copy could not be made; the original file was not overwritten.${recovery} ${String(error)}`);
+		}
+	}
+
+	// Write in place to preserve file identity, ACLs and open handles on shared drives.
 	private async writeLocalFile(normalizedPath: string, realPath: string, content: string | Buffer, op: string): Promise<void> {
 		const isCreate = this.getKnownMtime !== undefined && this.getKnownMtime(normalizePath(normalizedPath)) === undefined;
 		await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
+		let copy: string | null = null;
 		try {
 			const encoding = typeof content === 'string' ? 'utf8' : undefined;
 			if (isCreate) await fs.promises.writeFile(realPath, content, { flag: 'wx', encoding });
-			else if (encoding) await fs.promises.writeFile(realPath, content, encoding);
-			else await fs.promises.writeFile(realPath, content);
+			else {
+				copy = await this.makeSafetyCopy(realPath);
+				if (encoding) await fs.promises.writeFile(realPath, content, encoding);
+				else await fs.promises.writeFile(realPath, content);
+			}
 		} catch (e) {
 			if (isCreate && (e as NodeJS.ErrnoException).code === 'EEXIST') {
 				const err = new Error(
@@ -680,7 +705,17 @@ export class VirtualAdapter {
 				err.code = 'EEXIST';
 				throw err;
 			}
-			throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, op)}`);
+			const recovery = copy ? ` The previous version is kept at "${copy}".` : '';
+			if ((e as Error).message?.startsWith('Folder Bridge:')) throw e;
+			throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, op)}${recovery}`);
+		}
+		if (copy) {
+			try {
+				await fs.promises.unlink(copy);
+				await fs.promises.rmdir(path.dirname(copy));
+			} catch (error) {
+				logger.warn(`[FolderBridge] Save succeeded, but recovery-copy cleanup failed at "${copy}":`, error);
+			}
 		}
 	}
 

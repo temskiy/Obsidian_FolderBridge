@@ -21,7 +21,7 @@ describe('encoding-safe local saves', () => {
         mapper.update([mount]);
         return {
             file: join(directory, 'note.md'),
-            adapter: new VirtualAdapter({}, mapper, new SecurityManager([directory]), false, 1024,
+            adapter: new VirtualAdapter({ getBasePath: () => directory }, mapper, new SecurityManager([directory]), false, 1024,
                 async () => 'cancel', async () => {}, () => false),
         };
     }

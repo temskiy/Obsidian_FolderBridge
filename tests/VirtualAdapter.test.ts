@@ -75,6 +75,7 @@ describe('VirtualAdapter mounted writes', () => {
         const mapper = new PathMapper();
         mapper.update([mount], 'test-device');
         const original = {
+            getBasePath: () => tempDir,
             append: vi.fn().mockResolvedValue(undefined),
             writeBinary: vi.fn().mockResolvedValue(undefined),
             appendBinary: vi.fn().mockResolvedValue(undefined),
@@ -169,6 +170,143 @@ describe('VirtualAdapter mounted writes', () => {
         expect(await fs.readFile(filePath)).toEqual(operation === 'append' ? Buffer.from('initialmore') : Buffer.from([255, 0]));
         expect(original[operation]).not.toHaveBeenCalled();
         expect(onModify).toHaveBeenCalledExactlyOnceWith('Mounted/note.md');
+    });
+});
+
+describe('VirtualAdapter safety copy while overwriting local files', () => {
+    const tempDirs: string[] = [];
+
+    afterEach(async () => {
+        vi.restoreAllMocks();
+        await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+    });
+
+    async function setup(original: Record<string, unknown> | null = null, dryRun = false) {
+        const mountDir = await fs.mkdtemp(path.join(os.tmpdir(), 'folderbridge-save-mount-'));
+        const vaultDir = await fs.mkdtemp(path.join(os.tmpdir(), 'folderbridge-save-vault-'));
+        tempDirs.push(mountDir, vaultDir);
+        const mapper = new PathMapper();
+        mapper.update([makeMount(mountDir)], 'test-device');
+        const onModify = vi.fn().mockResolvedValue(undefined);
+        const adapter = new VirtualAdapter(
+            original ?? { getBasePath: () => vaultDir }, mapper, new SecurityManager([mountDir]), dryRun,
+            10 * 1024 * 1024, async () => 'delete', async () => { }, () => false, onModify,
+        );
+        return {
+            adapter, onModify, vaultDir,
+            filePath: path.join(mountDir, 'note.md'),
+            savingDir: path.join(vaultDir, '.trash', 'folderbridge-saving'),
+        };
+    }
+
+    async function save(adapter: VirtualAdapter, operation: 'write' | 'writeBinary', text: string) {
+        if (operation === 'write') await adapter.write('Mounted/note.md', text);
+        else await adapter.writeBinary('Mounted/note.md', new TextEncoder().encode(text).buffer);
+    }
+
+    it.each(['write', 'writeBinary'] as const)('%s overwrites in place and leaves no copy behind', async operation => {
+        const { adapter, onModify, filePath, savingDir } = await setup();
+        await fs.writeFile(filePath, 'previous');
+
+        await save(adapter, operation, 'new');
+
+        expect(await fs.readFile(filePath, 'utf8')).toBe('new');
+        expect(await fs.readdir(savingDir)).toEqual([]);
+        expect(onModify).toHaveBeenCalledExactlyOnceWith('Mounted/note.md');
+    });
+
+    it.each(['write', 'writeBinary'] as const)('%s keeps the previous version and names it when the save fails partway', async operation => {
+        const { adapter, onModify, filePath, savingDir } = await setup();
+        await fs.writeFile(filePath, 'previous');
+        const realWriteFile = nativeFs.writeFile.bind(nativeFs);
+        vi.spyOn(nativeFs, 'writeFile').mockImplementation(async (file, data, options) => {
+            if (file !== filePath) return realWriteFile(file, data, options);
+            // Simulate a full disk mid-save: the file is truncated, then the write fails.
+            await realWriteFile(file, '');
+            throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+        });
+
+        const error = await save(adapter, operation, 'new').then(() => null, (e: unknown) => e as Error);
+
+        const copies = await fs.readdir(savingDir);
+        expect(copies).toHaveLength(1);
+        expect(copies[0]).toMatch(/^save-/);
+        const copy = path.join(savingDir, copies[0], 'note.md');
+        expect(await fs.readFile(copy, 'utf8')).toBe('previous');
+        expect(error?.message).toContain('Not enough disk space');
+        expect(error?.message).toContain(copy);
+        expect(onModify).not.toHaveBeenCalled();
+    });
+
+    it.each(['missing', 'empty'])('makes no copy when the file is %s', async state => {
+        const { adapter, filePath, vaultDir } = await setup();
+        if (state === 'empty') await fs.writeFile(filePath, '');
+        const copyFile = vi.spyOn(nativeFs, 'copyFile');
+
+        await adapter.write('Mounted/note.md', 'new');
+
+        expect(await fs.readFile(filePath, 'utf8')).toBe('new');
+        expect(copyFile).not.toHaveBeenCalled();
+        await expect(fs.stat(path.join(vaultDir, '.trash'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each(['write', 'writeBinary'] as const)('refuses %s without changing the source if the safety copy fails', async operation => {
+        const { adapter, filePath, onModify } = await setup();
+        await fs.writeFile(filePath, 'previous');
+        vi.spyOn(nativeFs, 'copyFile').mockRejectedValue(Object.assign(new Error('access denied'), { code: 'EACCES' }));
+        const write = vi.spyOn(nativeFs, 'writeFile');
+        await expect(save(adapter, operation, 'new')).rejects.toThrow('safety copy could not be made');
+        expect(write).not.toHaveBeenCalled();
+        expect(await fs.readFile(filePath, 'utf8')).toBe('previous');
+        expect(onModify).not.toHaveBeenCalled();
+    });
+
+    it.each(['the copy fails', 'the vault path is unknown'])('refuses the save when %s', async reason => {
+        const { adapter, filePath } = await setup(reason === 'the copy fails' ? null : {});
+        if (reason === 'the copy fails') {
+            vi.spyOn(nativeFs, 'copyFile').mockRejectedValue(Object.assign(new Error('access denied'), { code: 'EACCES' }));
+        }
+        await fs.writeFile(filePath, 'previous');
+
+        await expect(adapter.write('Mounted/note.md', 'first')).rejects.toThrow('safety copy could not be made');
+        await expect(adapter.write('Mounted/note.md', 'second')).rejects.toThrow('safety copy could not be made');
+
+        expect(await fs.readFile(filePath, 'utf8')).toBe('previous');
+    });
+
+    it('makes no copy in dry-run mode', async () => {
+        const { adapter, filePath, vaultDir } = await setup(null, true);
+        await fs.writeFile(filePath, 'previous');
+
+        await adapter.write('Mounted/note.md', 'new');
+
+        expect(await fs.readFile(filePath, 'utf8')).toBe('previous');
+        await expect(fs.stat(path.join(vaultDir, '.trash'))).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('refuses binary overwrites if the source cannot be inspected', async () => {
+        const { adapter, filePath } = await setup();
+        await fs.writeFile(filePath, 'previous');
+        vi.spyOn(nativeFs, 'stat').mockRejectedValue(Object.assign(new Error('access denied'), { code: 'EACCES' }));
+        const write = vi.spyOn(nativeFs, 'writeFile');
+        await expect(save(adapter, 'writeBinary', 'new')).rejects.toThrow('original file could not be checked');
+        expect(write).not.toHaveBeenCalled();
+        expect(await fs.readFile(filePath, 'utf8')).toBe('previous');
+    });
+
+    it('reserves distinct recovery directories for concurrent failed saves', async () => {
+        const { adapter, filePath, savingDir } = await setup();
+        await fs.writeFile(filePath, 'previous');
+        vi.spyOn(nativeFs, 'writeFile').mockRejectedValue(Object.assign(new Error('disk full'), { code: 'ENOSPC' }));
+        const results = await Promise.allSettled([
+            adapter.write('Mounted/note.md', 'first'), adapter.writeBinary('Mounted/note.md', new ArrayBuffer(1)),
+        ]);
+        expect(results.every(result => result.status === 'rejected')).toBe(true);
+        const directories = await fs.readdir(savingDir);
+        expect(directories).toHaveLength(2);
+        for (const directory of directories) {
+            expect(await fs.readFile(path.join(savingDir, directory, 'note.md'), 'utf8')).toBe('previous');
+        }
     });
 });
 
@@ -549,7 +687,7 @@ describe('VirtualAdapter creates on local mounts never replace existing files', 
         mapper.update([mount], 'test-device');
         const onModify = vi.fn().mockResolvedValue(undefined);
         const adapter = new VirtualAdapter(
-            {},
+            { getBasePath: () => tempDir },
             mapper,
             new SecurityManager([tempDir]),
             false,

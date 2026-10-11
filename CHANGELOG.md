@@ -11,10 +11,15 @@ Local test candidate: **2.15.5-rc.5**, based on published rc.4 plus the combined
 S3 #57/#68 changes. This candidate is not a published release or stable promotion.
 
 ### Fixed
+- Make production native-addon stubs fail during module loading so SSH falls back to its working JavaScript cipher implementation (#78). Production-bundle regressions exercise actual AES-GCM and CTR handshakes.
+- Refuse mounted creates that would replace an existing, unindexed file (#80); manual text/binary creation fallbacks propagate disk and permission failures.
+- Decode UTF-16 BOM and Windows-1252 notes for reading, but refuse text saves/appends that would silently convert their encoding (#79). Every text save checks current disk bytes and refuses unreadable checks.
+- Before overwriting an existing non-empty local file, require a recovery copy in `<vault>/.trash/folderbridge-saving/save-<unique>/<original-name>` (#81). Failed copy/inspection refuses the save; failed writes retain the previous version and report its path. Successful writes remain in place and remove the temporary recovery copy.
 - Apply S3 mount prefixes exactly once to server paths, including active cloud device overrides. Bucket-root mounts retain their existing key mapping.
 - URL-encode S3 copy/rename source key segments, including spaces, Unicode, percent signs and reserved characters, while retaining slash separators and literal destination keys. File and paginated folder copies share the same encoding helper.
 
 ### Migration And Testing
+- These additional save-safety changes are integration work, not yet installed in the earlier local rc.5 build or published assets. Back up sources before testing. Temporary safety copies are not persistent version history and do not prevent concurrent external writers from changing a file during a save.
 - Existing non-root S3 mounts previously addressed doubled keys such as `notes/notes/a.md`. They now address `notes/a.md`. Old objects are not moved or deleted; they may appear under an extra nested folder rather than their former virtual location. Inspect the bucket with a provider tool and back up/copy objects before any explicit migration. Do not overwrite an existing corrected key.
 - This does not fix recursive S3 folder deletion or make copy/rename atomic. Failed folder copies can leave partial destination copies; source objects are retained. Do not use valuable data for failure tests.
 - Use the [Windows cumulative test checklist](docs/WINDOWS_TEST_CHECKLIST.md) for the local candidate. The published rc.4 SFTP release is unchanged, and native/live-provider results remain pending.
