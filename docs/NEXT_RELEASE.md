@@ -7,6 +7,19 @@ CI passes. The maintainer subsequently approved a separate opt-in
 2.15.5-rc.4 SFTP test release and a testing/review request to the contributor.
 Stable promotion is not approved.
 
+## Approved Cumulative Test Publication: 2.15.5-rc.6
+
+On October 12 the maintainer approved preparing and publishing the next opt-in
+test release. Use rc.6 to distinguish it from the two unpublished local rc.5
+builds. The candidate includes merged #77 (S3), #78 (production SFTP),
+#83 (local save safety) and #71 (private reporting policy), without another
+runtime behavior or dependency change. Require fresh PR/main/tag CI, verify
+the three published runtime assets and release notes, and keep stable 2.15.4
+latest. This authorization is not a native test pass or stable promotion.
+Native Windows/SMB, macOS, Android and live-provider tests remain pending.
+Use the rc.6 Windows checklist and native results rows 21-26 for new evidence.
+Do not replace the installed local runtime without fresh shutdown confirmation.
+
 ## Save-Safety Integration Follow-Up
 
 The approved sequence continues on `stabilization/save-safety-sequence`.
