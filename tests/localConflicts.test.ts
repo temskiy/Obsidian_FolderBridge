@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VirtualAdapter } from '../src/VirtualAdapter';
@@ -96,10 +97,10 @@ describe('copy-first local conflict protection', () => {
 
     it('refuses a save if the permanent conflict copy cannot be made', async () => {
         const { adapter, file, onModify } = await setup();
-        const originalWrite = fs.writeFile.bind(fs);
-        vi.spyOn(fs, 'writeFile').mockImplementation(async (destination, data, options) => {
+        const originalCopy = fs.copyFile.bind(fs);
+        vi.spyOn(fs, 'copyFile').mockImplementation(async (source, destination, mode) => {
             if (String(destination).includes('folderbridge-conflicts')) throw new Error('backup denied');
-            return originalWrite(destination, data, options);
+            return originalCopy(source, destination, mode);
         });
         await expect(adapter.write('Mounted/note.md', 'mine')).rejects.toThrow('changed version could not be preserved');
         expect(await fs.readFile(file, 'utf8')).toBe('original');
@@ -127,6 +128,87 @@ describe('copy-first local conflict protection', () => {
         vi.spyOn(fs, 'copyFile').mockRejectedValue(new Error('backup denied'));
         await expect(adapter.write('Mounted/note.md', 'mine')).rejects.toThrow('safety copy could not be made');
         expect(await copies()).toEqual([]);
+        expect(await fs.readFile(file, 'utf8')).toBe('original');
+    });
+
+    it.each(['copy', 'overwrite', 'unwired'] as const)('does not buffer a 32 MiB attachment during %s saves', async mode => {
+        const { adapter, file, conflicts } = await setup();
+        if (mode === 'unwired') adapter.getKnownMtime = undefined;
+        else adapter.getConflictMode = () => mode;
+        const size = 32 * 1024 * 1024;
+        const source = await fs.open(file, 'r+');
+        try {
+            await source.truncate(size);
+            await source.write(Buffer.from('tail'), 0, 4, size - 4);
+        } finally {
+            await source.close();
+        }
+        async function fingerprint(file: string) {
+            const hash = createHash('sha256');
+            for await (const chunk of createReadStream(file)) hash.update(chunk);
+            return hash.digest('hex');
+        }
+        const expected = await fingerprint(file);
+        const originalRead = fs.readFile.bind(fs);
+        vi.spyOn(fs, 'readFile').mockImplementation(async (path, options) => {
+            if (path === file) throw new Error('Unbounded source read');
+            return originalRead(path, options);
+        });
+        const originalOpen = fs.open.bind(fs);
+        const reads: Array<{ mock: { calls: unknown[][] } }> = [];
+        vi.spyOn(fs, 'open').mockImplementation(async (path, flags, mode) => {
+            const handle = await originalOpen(path, flags, mode);
+            reads.push(vi.spyOn(handle, 'read'));
+            return handle;
+        });
+        const copy = vi.spyOn(fs, 'copyFile');
+        const replacement = new Uint8Array([1, 2, 3]);
+        await adapter.writeBinary('Mounted/note.md', replacement.buffer);
+        for (const read of reads) {
+            for (const call of read.mock.calls) {
+                expect(Buffer.isBuffer(call[0])).toBe(true);
+                if (!Buffer.isBuffer(call[0])) throw new Error('Expected a fixed-size read buffer');
+                expect(call[0].length).toBeLessThanOrEqual(64 * 1024);
+                expect(call[2]).toBeLessThanOrEqual(64 * 1024);
+            }
+        }
+        if (mode !== 'copy') {
+            expect(reads).toHaveLength(0);
+            expect(copy).toHaveBeenCalledTimes(1);
+            await expect(fs.stat(conflicts)).rejects.toMatchObject({ code: 'ENOENT' });
+        } else {
+            expect(reads.flatMap(read => read.mock.calls).length).toBeGreaterThan(1);
+            const names = await fs.readdir(conflicts);
+            expect(names).toHaveLength(1);
+            const retained = join(conflicts, names[0], 'note.md');
+            expect((await fs.stat(retained)).size).toBe(size);
+            expect(await fingerprint(retained)).toBe(expected);
+            expect(copy).toHaveBeenCalledTimes(2);
+        }
+        const installed = await fs.open(file, 'r');
+        try {
+            expect(await installed.readFile()).toEqual(Buffer.from(replacement));
+        } finally {
+            await installed.close();
+        }
+    });
+
+    it('refuses conflict saves when a bounded source read fails and closes its handle', async () => {
+        const { adapter, file, onModify } = await setup();
+        const originalOpen = fs.open.bind(fs);
+        const closed: Array<{ mock: { calls: unknown[][] } }> = [];
+        vi.spyOn(fs, 'open').mockImplementation(async (path, flags, mode) => {
+            const handle = await originalOpen(path, flags, mode);
+            vi.spyOn(handle, 'read').mockRejectedValue(Object.assign(new Error('read denied'), { code: 'EACCES' }));
+            closed.push(vi.spyOn(handle, 'close'));
+            return handle;
+        });
+        const write = vi.spyOn(fs, 'writeFile');
+        await expect(adapter.writeBinary('Mounted/note.md', new Uint8Array([1]).buffer)).rejects.toThrow();
+        expect(write).not.toHaveBeenCalled();
+        expect(closed).toHaveLength(1);
+        expect(closed[0].mock.calls).toHaveLength(1);
+        expect(onModify).not.toHaveBeenCalled();
         expect(await fs.readFile(file, 'utf8')).toBe('original');
     });
 

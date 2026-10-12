@@ -62,6 +62,7 @@ Fill in once per test machine or device and refer to it by its label.
 | 24 | rc.6 save recovery: local/SMB normal save, backup refusal, failed-write retained recovery path and exact previous bytes | #81 / #83 | | Not run | |
 | 25 | rc.6 conflicts: external same-size edits, binary copies, failed conflict copy, rapid own saves, process/append and explicit overwrite with required safety recovery | #82 / #83 | | Not run | |
 | 26 | rc.6 S3: root/non-root exact keys, encoded copy sources, active-device overrides, paginated copies and legacy doubled-prefix migration checks | #57 / #68 / #62 | | Not run | |
+| 27 | rc.7 memory regression: large local/SMB attachment overwrite in copy/overwrite modes, exact retained/replacement bytes, backup failures and responsive native host without memory errors | #83 memory review | | Not run | |
 
 Notes on specific rows:
 

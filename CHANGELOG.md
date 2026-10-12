@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.5-rc.7] - 2026-10-12
+
+Opt-in memory-regression fix on top of rc.6. Stable 2.15.4 remains latest;
+this is not stable promotion or native validation.
+
+### Fixed
+- Avoid buffering the entire existing file before a local overwrite. Binary saves in explicit overwrite mode, or without conflict lookup hooks, skip old-content reads while still requiring recovery for existing non-empty files.
+- Stream conflict fingerprints through a fixed 64 KiB read buffer and retain conflicting versions using exclusive filesystem copies. Unverified/same-time/same-size conflict detection, own-write tracking, fail-closed recovery and in-place writes are preserved.
+- Stream text-save encoding checks, including UTF-8 sequences spanning chunk boundaries and incomplete final sequences, without decoding a whole old note into memory. Hash replacement text directly instead of allocating an extra UTF-8 buffer for tracking.
+
+### Testing And Limitations
+- Regression tests overwrite 32 MiB attachments in conflict-copy, explicit-overwrite and unwired-adapter modes. They prohibit whole-file source reads, assert read buffers never exceed 64 KiB, verify exact retained-copy hashes, and require recovery/read failures to leave the source untouched.
+- Local Windows lint/UI/TypeScript/production build pass; the full suite reports 672 passed and four unchanged separator-expectation failures, 676 total across 23 files. One existing lint warning remains. Fresh Ubuntu/Node 20 PR, main and release CI are required before publication.
+- Install `main.js`, `manifest.json` and `styles.css` from rc.7 together. Test on disposable local/SMB sources, including large attachments, backup failures, external edits and legacy encodings. Record exact OS/Obsidian/build results in the [native results sheet](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.7/docs/NATIVE_TEST_RESULTS.md); native evidence remains pending.
+- This bounds the old-content inspection buffer, not total save memory: Obsidian still supplies the new content in memory, and ordinary read/append APIs are unchanged. Existing [rc.6 migration guidance and limitations](https://github.com/tescolopio/Obsidian_FolderBridge/releases/tag/2.15.5-rc.6) apply. Copies still contain source data in vault trash, and check/copy/write is not atomic against external writers.
+- Dependencies and minimum host are unchanged. Dependency advisories and broader #63 path/security/native gates remain outstanding. Automatic merging/editor reload remains deferred.
+
 ## [2.15.5-rc.6] - 2026-10-12
 
 Opt-in cumulative S3, SFTP and local save-safety test release, based on rc.4
