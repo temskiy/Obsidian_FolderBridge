@@ -65,9 +65,36 @@ describe('encoding-safe local saves', () => {
     it('refuses a save when encoding verification cannot read the file', async () => {
         const { file, adapter } = await setup();
         await fs.writeFile(file, 'old');
-        vi.spyOn(fs, 'readFile').mockRejectedValue(Object.assign(new Error('access denied'), { code: 'EACCES' }));
+        vi.spyOn(fs, 'open').mockRejectedValue(Object.assign(new Error('access denied'), { code: 'EACCES' }));
         const write = vi.spyOn(fs, 'writeFile');
         await expect(adapter.write('Mounted/note.md', 'new')).rejects.toThrow('Could not verify text encoding');
         expect(write).not.toHaveBeenCalled();
+    });
+
+    it('validates UTF-8 across the 64 KiB read boundary without whole-file reads', async () => {
+        const { file, adapter } = await setup();
+        const text = 'x'.repeat(64 * 1024 - 1) + '\u20ac' + 'tail';
+        await fs.writeFile(file, text);
+        const originalRead = fs.readFile.bind(fs);
+        const read = vi.spyOn(fs, 'readFile').mockRejectedValue(new Error('Unbounded source read'));
+        await adapter.write('Mounted/note.md', text + '!');
+        expect(read).not.toHaveBeenCalled();
+        expect(await originalRead(file, 'utf8')).toBe(text + '!');
+    });
+
+    it('refuses a truncated multibyte sequence at end of the final chunk', async () => {
+        const { file, adapter } = await setup();
+        const bytes = Buffer.concat([Buffer.alloc(64 * 1024, 0x78), Buffer.from([0xe2, 0x82])]);
+        await fs.writeFile(file, bytes);
+        await expect(adapter.write('Mounted/note.md', 'new')).rejects.toThrow('not stored as UTF-8');
+        expect(await fs.readFile(file)).toEqual(bytes);
+    });
+
+    it('refuses legacy bytes beyond the first read chunk', async () => {
+        const { file, adapter } = await setup();
+        const bytes = Buffer.concat([Buffer.alloc(64 * 1024, 0x78), Buffer.from([0x96])]);
+        await fs.writeFile(file, bytes);
+        await expect(adapter.write('Mounted/note.md', 'new')).rejects.toThrow('not stored as UTF-8');
+        expect(await fs.readFile(file)).toEqual(bytes);
     });
 });

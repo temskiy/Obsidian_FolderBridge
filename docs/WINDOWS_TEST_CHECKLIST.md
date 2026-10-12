@@ -2,16 +2,17 @@
 
 ## Build And Scope
 
-Target: **opt-in 2.15.5-rc.6 test release**. It contains all published
+Target: **opt-in 2.15.5-rc.7 test release**. It contains all published
 rc.4 fixes, including the earlier compatibility, watcher, override and trash
 work, plus the combined S3 prefix and copy-source fixes (#57/#68), production
 SFTP cipher fallback (#78) and local save-safety integration (#83).
+rc.7 bounds old-content inspection memory during overwrite/conflict checks.
 It does not include every open issue or complete security/native hardening.
 Published rc.4 and stable 2.15.4 are unchanged.
 
 ### Additional Save-Safety Checks
 
-These checks apply to the rc.6 release artifacts. Historical local rc.5 builds
+These checks apply to the rc.7 release artifacts. Historical local rc.5 builds
 differed: the October 3 bundle lacked these fixes, while the October 11 updated
 bundle included them. Do not identify a historical local build by version alone.
 
@@ -57,10 +58,16 @@ bundle included them. Do not identify a historical local build by version alone.
 - [ ] Keep both drafts after any disagreement, pause writers and restore
   manually. Conflict copies are retained, not auto-cleaned; these checks do
   not prove atomic exclusion of concurrent SMB/external writers.
+- [ ] Memory regression: overwrite a disposable large attachment in both
+  conflict-copy and explicit-overwrite modes. Check the replacement bytes,
+  retained conflict copy where applicable, and responsive native Obsidian
+  behavior without memory errors. The automated test covers 32 MiB old files
+  and a 64 KiB inspection buffer; it does not measure native total memory.
+  Restore recommended copy mode afterward.
 
 Record the installed bundle SHA-256, release tag and backup directory.
 Install all three runtime assets from the same release. After restarting
-Obsidian, confirm Folder Bridge shows `2.15.5-rc.6`.
+Obsidian, confirm Folder Bridge shows `2.15.5-rc.7`.
 
 ## Safety First
 

@@ -346,6 +346,11 @@ The opt-in rc.6 release includes the save-safety integration from #83.
 Published rc.4 and the earlier October 3 local rc.5 candidate do not contain
 these additional changes. The updated October 11 local rc.5 build does.
 Back up sources and use disposable data; native testing remains pending.
+The rc.7 follow-up bounds old-content inspection during overwrites to 64 KiB
+chunks and uses filesystem conflict copies instead of buffering entire old
+attachments. Explicit binary overwrite skips old-content inspection while
+retaining required recovery. New content is still supplied in memory;
+ordinary read/append APIs are unchanged.
 
 - Creating a new mounted file refuses to replace an existing, unindexed file.
 - Windows-1252 and BOM-marked UTF-16 notes can be read, but text saving/appending

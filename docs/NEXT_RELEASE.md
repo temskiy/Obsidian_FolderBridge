@@ -7,6 +7,20 @@ CI passes. The maintainer subsequently approved a separate opt-in
 2.15.5-rc.4 SFTP test release and a testing/review request to the contributor.
 Stable promotion is not approved.
 
+## Approved Memory Follow-Up: 2.15.5-rc.7
+
+On October 12 the maintainer requested the #83 overwrite-memory review fix
+be integrated into main and published. rc.7 avoids loading whole old files
+for overwrite/conflict inspection: binary overwrite mode skips the read;
+conflict hashing and text encoding checks use a 64 KiB read buffer, and
+conflict retention uses exclusive filesystem copies. Replacement content
+is still supplied in memory; read/append APIs are unchanged. Recovery refusal,
+copy-first defaults and in-place saves remain mandatory.
+
+Require fresh PR/main/tag CI and verified artifacts before publication.
+Stable 2.15.4 remains latest; native results stay pending. Scope excludes
+the unrelated fallback-test and documentation review findings.
+
 ## Approved Cumulative Test Publication: 2.15.5-rc.6
 
 On October 12 the maintainer approved preparing and publishing the next opt-in

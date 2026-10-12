@@ -695,7 +695,7 @@ export class VirtualAdapter {
 		return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 	}
 
-	private rememberContent(realPath: string, bytes: Uint8Array, replace: boolean): void {
+	private rememberContent(realPath: string, bytes: string | Uint8Array, replace: boolean): void {
 		if (!this.getKnownMtime) return;
 		const key = this.localSaveKey(realPath);
 		// Keep the oldest observed version until our next save: background reads
@@ -727,13 +727,60 @@ export class VirtualAdapter {
 		}
 	}
 
-	private async preserveConflict(normalizedPath: string, realPath: string, bytes: Buffer | null, content: string | Buffer): Promise<string | null> {
+	// Hash and validate incrementally: old attachments must not occupy a second whole-file buffer.
+	private async inspectLocalContent(realPath: string, checkEncoding: boolean): Promise<{ fingerprint: string; nonUtf8: boolean } | null> {
+		let handle: import('fs/promises').FileHandle;
+		try {
+			handle = await fs.promises.open(realPath, 'r');
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+			throw error;
+		}
+		try {
+			const hash = crypto.createHash('sha256');
+			const buffer = Buffer.alloc(64 * 1024);
+			const decoder = checkEncoding ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }) : null;
+			const prefix: number[] = [];
+			let nonUtf8 = false;
+			while (true) {
+				const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+				if (bytesRead === 0) break;
+				const chunk = buffer.subarray(0, bytesRead);
+				hash.update(chunk);
+				if (decoder && !nonUtf8) {
+					for (let index = 0; index < bytesRead && prefix.length < 2; index++) prefix.push(chunk[index]);
+					nonUtf8 = (prefix[0] === 0xff && prefix[1] === 0xfe) || (prefix[0] === 0xfe && prefix[1] === 0xff);
+					if (!nonUtf8) {
+						try {
+							decoder.decode(chunk, { stream: true });
+						} catch (error) {
+							if (!(error instanceof TypeError)) throw error;
+							nonUtf8 = true;
+						}
+					}
+				}
+			}
+			if (decoder && !nonUtf8) {
+				try {
+					decoder.decode();
+				} catch (error) {
+					if (!(error instanceof TypeError)) throw error;
+					nonUtf8 = true;
+				}
+			}
+			return { fingerprint: hash.digest('hex'), nonUtf8 };
+		} finally {
+			await handle.close();
+		}
+	}
+
+	private async preserveConflict(normalizedPath: string, realPath: string, content: string | Buffer, fingerprint?: string | null): Promise<string | null> {
 		if (!this.getKnownMtime || this.getKnownMtime(normalizePath(normalizedPath)) === undefined ||
-			this.getConflictMode?.() === 'overwrite' || bytes === null) return null;
-		const desired = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
-		if (bytes.equals(desired)) return null;
+			this.getConflictMode?.() === 'overwrite') return null;
+		const current = fingerprint === undefined ? (await this.inspectLocalContent(realPath, false))?.fingerprint ?? null : fingerprint;
+		if (current === null || current === crypto.createHash('sha256').update(content).digest('hex')) return null;
 		const observed = this.observedContent.get(this.localSaveKey(realPath));
-		if (observed === crypto.createHash('sha256').update(bytes).digest('hex')) return null;
+		if (observed === current) return null;
 		let directory: string | undefined;
 		try {
 			const basePath = (this.orig() as DataAdapter & { getBasePath?(): string }).getBasePath?.();
@@ -742,7 +789,7 @@ export class VirtualAdapter {
 			await fs.promises.mkdir(root, { recursive: true });
 			directory = await fs.promises.mkdtemp(path.join(root, 'conflict-'));
 			const copy = path.join(directory, path.basename(realPath));
-			await fs.promises.writeFile(copy, bytes, { flag: 'wx' });
+			await fs.promises.copyFile(realPath, copy, fs.constants.COPYFILE_EXCL);
 			return copy;
 		} catch (error) {
 			const location = directory ? ` Inspect "${directory}" for an incomplete copy.` : '';
@@ -782,15 +829,8 @@ export class VirtualAdapter {
 				await fs.promises.writeFile(realPath, content, { flag: 'wx', encoding });
 			}
 			else {
-				let bytes: Buffer | null;
-				try {
-					bytes = await fs.promises.readFile(realPath);
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-					bytes = null;
-				}
-				if (encoding) await this.assertTextSavable(normalizedPath, realPath);
-				conflict = await this.preserveConflict(normalizedPath, realPath, bytes, content);
+				const fingerprint = encoding ? await this.assertTextSavable(normalizedPath, realPath) : undefined;
+				conflict = await this.preserveConflict(normalizedPath, realPath, content, fingerprint);
 				copy = await this.makeSafetyCopy(realPath);
 				this.assertLocalSaveCurrent(normalizedPath, realPath);
 				if (encoding) await fs.promises.writeFile(realPath, content, encoding);
@@ -813,7 +853,7 @@ export class VirtualAdapter {
 			}
 			throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, op)}${recovery}`);
 		}
-		this.rememberContent(realPath, typeof content === 'string' ? Buffer.from(content, 'utf8') : content, true);
+		this.rememberContent(realPath, content, true);
 		if (conflict) new Notice(`Folder Bridge: Saved your changes. The previous changed or unverified version is kept at "${conflict}".`, 10000);
 		if (copy) {
 			try {
@@ -832,19 +872,17 @@ export class VirtualAdapter {
 	 * against the file on disk, so a file converted to UTF-8 (or replaced)
 	 * since it was read can be saved again.
 	 */
-	private async assertTextSavable(normalizedPath: string, realPath: string): Promise<void> {
+	private async assertTextSavable(normalizedPath: string, realPath: string): Promise<string | null> {
 		const key = normalizePath(normalizedPath);
-		let stillNonUtf8 = false;
+		let current: { fingerprint: string; nonUtf8: boolean } | null;
 		try {
-			stillNonUtf8 = decodeText(await fs.promises.readFile(realPath)).nonUtf8;
+			current = await this.inspectLocalContent(realPath, true);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-				throw new Error(`Folder Bridge: Could not verify text encoding before saving "${realPath}": ${translateFsError(error as NodeJS.ErrnoException, 'read')}`);
-			}
+			throw new Error(`Folder Bridge: Could not verify text encoding before saving "${realPath}": ${translateFsError(error as NodeJS.ErrnoException, 'read')}`);
 		}
-		if (!stillNonUtf8) {
+		if (!current?.nonUtf8) {
 			this.nonUtf8Files.delete(key);
-			return;
+			return current?.fingerprint ?? null;
 		}
 		throw new Error(
 			`Folder Bridge: "${path.basename(realPath)}" is not stored as UTF-8 text (it uses an older Windows encoding or UTF-16). ` +
