@@ -340,10 +340,12 @@ Prevent any write operations through a specific mount (useful for reference fold
 
 ---
 
-### Local Save Safety (Unpublished Integration)
+### Local Save Safety (Opt-In 2.15.5-rc.6)
 
-The save-safety integration branch builds on rc.5; the earlier installed rc.5
-candidate and published rc.4 assets do not contain these additional changes.
+The opt-in rc.6 release includes the save-safety integration from #83.
+Published rc.4 and the earlier October 3 local rc.5 candidate do not contain
+these additional changes. The updated October 11 local rc.5 build does.
+Back up sources and use disposable data; native testing remains pending.
 
 - Creating a new mounted file refuses to replace an existing, unindexed file.
 - Windows-1252 and BOM-marked UTF-16 notes can be read, but text saving/appending

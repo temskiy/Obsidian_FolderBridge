@@ -56,6 +56,12 @@ Fill in once per test machine or device and refer to it by its label.
 | 18 | Remote root trash: only cancel/unmount offered even with "Don't ask again"; cancel leaves confirmation preference unchanged; permanent-delete dialog remains available | #73 / #74 | | Not run | |
 | 19 | rc.4 SFTP trust: independently compare first fingerprint; wait at least 30 seconds before approval; approve/cancel and reconnect; restart, changed-key refusal, host/port edits and explicit reset | #60 / #63 | | Not run | |
 | 20 | Local rc.5 S3: root/non-root prefixes, provider-confirmed exact keys, copy/rename source encoding, paginated folder copy and retained legacy doubled-prefix objects | #57 / #68 / #62 | | Not run | |
+| 21 | rc.6 production SFTP: packaged plugin connects, opens/saves a copied note and reconnects without first encrypted-packet failure | #78 / #83 | | Not run | |
+| 22 | rc.6 unindexed creates: text/binary same-name creation refuses without replacing existing source bytes | #80 / #83 | | Not run | |
+| 23 | rc.6 encoding: Windows-1252/UTF-16 reads are readable; save/append refuses without byte changes; converted UTF-8/BOM round-trip | #79 / #83 | | Not run | |
+| 24 | rc.6 save recovery: local/SMB normal save, backup refusal, failed-write retained recovery path and exact previous bytes | #81 / #83 | | Not run | |
+| 25 | rc.6 conflicts: external same-size edits, binary copies, failed conflict copy, rapid own saves, process/append and explicit overwrite with required safety recovery | #82 / #83 | | Not run | |
+| 26 | rc.6 S3: root/non-root exact keys, encoded copy sources, active-device overrides, paginated copies and legacy doubled-prefix migration checks | #57 / #68 / #62 | | Not run | |
 
 Notes on specific rows:
 

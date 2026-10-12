@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Local test candidate: **2.15.5-rc.5**, based on published rc.4 plus the combined
-S3 #57/#68 changes. This candidate is not a published release or stable promotion.
+## [2.15.5-rc.6] - 2026-10-12
+
+Opt-in cumulative S3, SFTP and local save-safety test release, based on rc.4
+plus merged #77, #78, #83 and #71. The rc.5 builds were local-only and were not
+published. This is not stable promotion or a claim of native validation.
+Stable 2.15.4 remains latest.
 
 ### Fixed
 - Make production native-addon stubs fail during module loading so SSH falls back to its working JavaScript cipher implementation (#78). Production-bundle regressions exercise actual AES-GCM and CTR handshakes.
@@ -21,11 +25,21 @@ S3 #57/#68 changes. This candidate is not a published release or stable promotio
 - URL-encode S3 copy/rename source key segments, including spaces, Unicode, percent signs and reserved characters, while retaining slash separators and literal destination keys. File and paginated folder copies share the same encoding helper.
 
 ### Migration And Testing
-- These additional save-safety changes are integration work, not yet installed in the earlier local rc.5 build or published assets. Back up sources before testing. Temporary safety copies are not persistent version history and do not prevent concurrent external writers from changing a file during a save.
+- Back up the vault, settings and mounted sources. Install `main.js`, `manifest.json` and `styles.css` from rc.6 together in a disposable vault. Keep **Changes on the drive before saving** set to the recommended conflict-copy mode for testing. New save refusals are intentional when encoding checks or required recovery cannot complete.
+- Temporary safety copies are not persistent version history and do not prevent concurrent external writers from changing a file during a save. Recovery and conflict copies contain source contents in the vault trash; protect access to the vault, backups and sync destinations.
 - Conflict copies are retained after successful saves for manual review; copy them back only after pausing writers. There is no automatic retention cleanup. Fingerprints are bounded to 512 recently observed paths per session; an evicted/unread/rerouted path gets a conservative copy on its next overwrite. Later reads alone do not replace the older baseline, so extra copies are possible. This is not atomic protection against other processes writing during the check/copy/write window.
 - Existing non-root S3 mounts previously addressed doubled keys such as `notes/notes/a.md`. They now address `notes/a.md`. Old objects are not moved or deleted; they may appear under an extra nested folder rather than their former virtual location. Inspect the bucket with a provider tool and back up/copy objects before any explicit migration. Do not overwrite an existing corrected key.
 - This does not fix recursive S3 folder deletion or make copy/rename atomic. Failed folder copies can leave partial destination copies; source objects are retained. Do not use valuable data for failure tests.
-- Use the [Windows cumulative test checklist](docs/WINDOWS_TEST_CHECKLIST.md) for the local candidate. The published rc.4 SFTP release is unchanged, and native/live-provider results remain pending.
+- Use the [Windows cumulative test checklist](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.6/docs/WINDOWS_TEST_CHECKLIST.md), including the save-safety checks, and record exact build/environment results in the [native results sheet](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.6/docs/NATIVE_TEST_RESULTS.md). Earlier published releases are unchanged. Native Windows/SMB, macOS, Android and live-provider results for this candidate remain pending.
+
+### Security Reporting
+- Add the [security policy](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.6/SECURITY.md) and enable GitHub private vulnerability reporting. This establishes a private reporting channel, not resolution of the broader #63 concerns.
+
+### Validation And Known Limitations
+- Integrated runtime passed Ubuntu/Node 20 PR and main validation with 669/669 tests across 23 files. Local Windows lint, UI checks, TypeScript and redirected production bundling pass; the full suite reports 665 passed and four unchanged separator-expectation failures. One existing sentence-case lint warning remains. Release preparation and tag publication require fresh CI validation.
+- Production SFTP regressions exercise the actual bundled client with encrypted AES-GCM and CTR loopback exchanges; this is not native Obsidian or live-server evidence. Existing rc.4 fingerprint approval, reset and bounded reconnect behavior is retained.
+- All [rc.4 limitations](https://github.com/tescolopio/Obsidian_FolderBridge/releases/tag/2.15.5-rc.4) remain except the S3 prefix/copy-source fixes now included. Remote recoverable trash and recursive S3 folder deletion remain unsupported/unfixed. Copy/rename and recovery are not atomic with external writers.
+- Dependency advisories, whole-home/whole-drive descendant policy, symlink/path-containment concerns and broader native compatibility remain outstanding. Dependencies and minimum Obsidian version are unchanged; SFTP remains desktop-only. Stable promotion needs a separate approval and the [remaining release gates](https://github.com/tescolopio/Obsidian_FolderBridge/blob/2.15.5-rc.6/docs/NEXT_RELEASE.md).
 
 ## [2.15.5-rc.4] - 2026-10-03
 

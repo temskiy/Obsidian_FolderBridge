@@ -2,17 +2,18 @@
 
 ## Build And Scope
 
-Target: **local 2.15.5-rc.5 candidate**, unpublished. It contains all published
+Target: **opt-in 2.15.5-rc.6 test release**. It contains all published
 rc.4 fixes, including the earlier compatibility, watcher, override and trash
-work, plus the combined S3 prefix and copy-source fixes (#57/#68).
+work, plus the combined S3 prefix and copy-source fixes (#57/#68), production
+SFTP cipher fallback (#78) and local save-safety integration (#83).
 It does not include every open issue or complete security/native hardening.
 Published rc.4 and stable 2.15.4 are unchanged.
 
-### Additional Save-Safety Branch Checks
+### Additional Save-Safety Checks
 
-These checks require the newer `stabilization/save-safety-sequence` bundle.
-The earlier installed local rc.5 bundle does **not** contain these fixes.
-Do not claim a pass until the installation report identifies the newer bundle.
+These checks apply to the rc.6 release artifacts. Historical local rc.5 builds
+differed: the October 3 bundle lacked these fixes, while the October 11 updated
+bundle included them. Do not identify a historical local build by version alone.
 
 - [ ] SFTP: approve an independently verified test-server key, open and save a
   disposable note, and reconnect. Capture any first encrypted-packet error.
@@ -57,9 +58,9 @@ Do not claim a pass until the installation report identifies the newer bundle.
   manually. Conflict copies are retained, not auto-cleaned; these checks do
   not prove atomic exclusion of concurrent SMB/external writers.
 
-Record the installed bundle SHA-256 and backup directory from the local
-installation report. Version alone is not enough to identify an unpublished
-build. After restarting Obsidian, confirm Folder Bridge shows `2.15.5-rc.5`.
+Record the installed bundle SHA-256, release tag and backup directory.
+Install all three runtime assets from the same release. After restarting
+Obsidian, confirm Folder Bridge shows `2.15.5-rc.6`.
 
 ## Safety First
 
@@ -67,7 +68,7 @@ build. After restarting Obsidian, confirm Folder Bridge shows `2.15.5-rc.5`.
 - [ ] Use disposable source folders and notes for every write/delete test.
 - [ ] Start with other plugins disabled; repeat compatibility checks with them
   enabled only after the isolated pass. Pause sync and external writers.
-- [ ] Pause plugin auto-updaters while testing this unpublished local build.
+- [ ] Pause plugin auto-updaters while testing this opt-in prerelease.
 - [ ] Do not post `data.json`, credentials, tokens or unredacted server logs.
 - [ ] Use test-only SFTP credentials and a disposable S3 prefix/bucket.
 - [ ] Review existing non-root S3 mounts before opening this build for writes.

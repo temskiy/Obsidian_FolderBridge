@@ -1,13 +1,17 @@
 # Compatibility Release Validation
 
-## Windows Cumulative Local Candidate
+## Cumulative Test Release: 2.15.5-rc.6
 
-The unpublished local 2.15.5-rc.5 candidate contains all published rc.4 fixes plus
-the combined S3 #57/#68 changes. Follow the
+The approved opt-in 2.15.5-rc.6 publication contains all published rc.4 fixes plus
+the combined S3 #57/#68 changes, production SFTP cipher fallback (#78),
+local save-safety integration (#83) and verified private reporting policy (#71).
+rc.5 was local-only; its October 3 and October 11 builds differed. Follow the
 [Windows test checklist](WINDOWS_TEST_CHECKLIST.md), especially the S3 migration
 warning, and record actual native outcomes in the
-[results sheet](NATIVE_TEST_RESULTS.md). Published rc.4 remains the separate
-SFTP test release; neither candidate is stable promotion.
+[results sheet](NATIVE_TEST_RESULTS.md). Earlier published releases are unchanged,
+and stable 2.15.4 remains latest. Required recovery and encoding checks can
+intentionally refuse saves. Conflict copies are the default; automatic merging
+and editor reload are deferred. No native pass or stable promotion is implied.
 
 ## Safety Candidate: 2.15.5-rc.3
 
