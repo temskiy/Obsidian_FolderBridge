@@ -57,6 +57,8 @@ export class VirtualAdapter {
 	private vaultPriority: number = 1000;
 	private conflictResolution: 'folders-win' | 'files-win' = 'folders-win';
 	private enableMountMerging: boolean = false;
+	/** Where new files/folders should be created when path overlaps vault+mounts. 'mounts' = priority-based, 'vault' = local vault only. */
+	private defaultCreationVault: string = 'mounts';
 	/** Mount IDs that have already shown a read-only notice this session (one-time per mount). */
 	private readOnlyNoticedMounts: Set<string> = new Set();
 	/** Optional localhost HTTP server for streaming video/audio from local mounts. */
@@ -165,6 +167,8 @@ export class VirtualAdapter {
 
 	/** Update mount merging toggle without reloading the plugin. */
 	setEnableMountMerging(val: boolean): void { this.enableMountMerging = val; }
+	/** Update default creation vault without reloading the plugin. */
+	setDefaultCreationVault(val: string): void { this.defaultCreationVault = val; }
 
 	/** Update debug logging without reloading the plugin. */
 	setDebugLogging(val: boolean): void { setDebugLogging(val); }
@@ -1261,7 +1265,18 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async write(normalizedPath: string, data: string, options?: unknown): Promise<void> {
+		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
+		logger.debug(`[FolderBridge DEBUG write ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
+
 		logger.debug(`[FolderBridge WRITE] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)} hasMounts=${this.pathMapper.getMountsForPath(normalizedPath).length > 0}`);
+
+		// Respect defaultCreationVault: when set to 'vault', always create in local vault
+		if (this.defaultCreationVault === 'vault') {
+			logger.debug(`[FolderBridge DEBUG write] → redirecting to vault (orig().write)`);
+			await this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
+		}
 
 		// Always delegate Obsidian's internal files to the original adapter.
 		if (this.isVaultInternalPath(normalizedPath)) {
@@ -1397,7 +1412,18 @@ export class VirtualAdapter {
 	}
 
 	async writeBinary(normalizedPath: string, data: ArrayBuffer, options?: unknown): Promise<void> {
+		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
+		logger.debug(`[FolderBridge DEBUG writeBinary ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
+
 		logger.debug(`[FolderBridge WRITE_BINARY] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)}`);
+
+		// Respect defaultCreationVault: when set to 'vault', always create in local vault
+		if (this.defaultCreationVault === 'vault') {
+			logger.debug(`[FolderBridge DEBUG writeBinary] → redirecting to vault (orig().writeBinary)`);
+			await this.orig().writeBinary(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
+		}
 
 		// Always delegate Obsidian's internal files to the original adapter.
 		if (this.isVaultInternalPath(normalizedPath)) {
@@ -1525,6 +1551,17 @@ export class VirtualAdapter {
 	}
 
 	async append(normalizedPath: string, data: string, options?: unknown): Promise<void> {
+		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
+		logger.debug(`[FolderBridge DEBUG append ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
+
+		// Respect defaultCreationVault: when set to 'vault', always create in local vault
+		if (this.defaultCreationVault === 'vault') {
+			logger.debug(`[FolderBridge DEBUG append] → redirecting to vault (orig().append)`);
+			await this.orig().append(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
+		}
+
 		// If mount merging is disabled, use simple mount lookup without priority checks
 		if (!this.enableMountMerging) {
 			const mount = this.pathMapper.getMountForPath(normalizedPath);
@@ -1793,7 +1830,18 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async mkdir(normalizedPath: string): Promise<void> {
+		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
+		logger.debug(`[FolderBridge DEBUG mkdir ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
+
+		// Respect defaultCreationVault: when set to 'vault', always create in local vault
+		if (this.defaultCreationVault === 'vault') {
+			logger.debug(`[FolderBridge DEBUG mkdir] → redirecting to vault (orig().mkdir)`);
+			return this.orig().mkdir(normalizedPath);
+		}
+
 		const mount = this.pathMapper.getMountForPath(normalizedPath);
+		logger.debug(`[FolderBridge DEBUG mkdir] mount=${mount ? mount.id + ' (' + mount.virtualPath + ')' : 'none'}`);
+
 		if (mount) {
 			if (mount.readOnly) { this.warnReadOnly(mount); return; }
 			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot create ignored path "${normalizedPath}"`);
@@ -2070,6 +2118,15 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async rename(normalizedPath: string, newNormalizedPath: string): Promise<void> {
+		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
+		logger.debug(`[FolderBridge DEBUG rename ENTRY] from="${normalizedPath}" to="${newNormalizedPath}", defaultCreationVault="${this.defaultCreationVault}"`);
+
+		// Respect defaultCreationVault: when set to 'vault', always rename in local vault
+		if (this.defaultCreationVault === 'vault') {
+			logger.debug(`[FolderBridge DEBUG rename] → redirecting to vault (orig().rename)`);
+			return this.orig().rename(normalizedPath, newNormalizedPath);
+		}
+
 		const rootMount = this.pathMapper.getMountByVirtualPath(normalizedPath);
 		if (rootMount) {
 			// The user dragged or moved the mount root folder in the file explorer.
