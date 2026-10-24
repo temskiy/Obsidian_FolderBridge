@@ -4,6 +4,8 @@
  */
 export type MountType = 'local' | 'webdav' | 'vault' | 's3' | 'sftp';
 export type MountVisibleFileFilter = 'all' | 'markdown-only' | 'pdf-only';
+/** UI language selector value. 'auto' follows the Obsidian/OS locale. */
+export type Language = 'auto' | 'en' | 'ru';
 
 export interface MountPoint {
 	id: string;            // Unique identifier (generated at creation)
@@ -18,6 +20,8 @@ export interface MountPoint {
 	enabled: boolean;      // Whether the mount is currently active
 	readOnly: boolean;     // Block all write operations through this mount
 	label?: string;        // Optional human-readable display name
+	priority?: number;     // Mount priority for conflict resolution (higher wins; default 1000)
+	addCommand?: boolean;  // Register a command in Obsidian's command palette for this mount
 	deviceId?: string;     // The device ID that created this mount (for sync compatibility)
 	deviceOverrides?: Record<string, string>; // Map of deviceId -> realPath override
 	ignoreList?: string[]; // List of file/folder names to ignore for this specific mount
@@ -111,12 +115,25 @@ export interface MountPoint {
 	encryptedSftpPassphrase?: string;
 	/** TRANSIENT — carries the raw passphrase from the modal. Never persisted. */
 	sftpPassphrase?: string;
+	/** Tags for grouping mounts (e.g. ["work", "backup"]). */
+	tags?: string[];
 	/** Runtime-only source path when this mount is generated from a TOC config file. */
 	tocSourcePath?: string;
+	/** When true, shows a confirmation modal when copying/moving files larger than threshold into this mount. */
+	enableLargeFileConfirm?: boolean;
+	/** Threshold in kilobytes for large file confirmation (default: 1024 = 1 MB). */
+	largeFileThresholdKB?: number;
+	/** Custom highlight color for this mount's files in the file explorer. Empty = no highlight. */
+	highlightColor?: string;
 }
 
 export interface FolderBridgeSettings {
 	mountPoints: MountPoint[];
+	/** When true, enables priority-based conflict resolution between vault and mounts. */
+	enableMountMerging: boolean;
+	vaultPriority: number;  // Priority of the local vault itself in conflict resolution (default 1000)
+	conflictResolution: 'folders-win' | 'files-win';  // How to resolve file-vs-folder conflicts
+	mountListSort: 'default' | 'name-asc' | 'name-desc' | 'priority-asc' | 'priority-desc';  // Sort order for mount list in settings
 	allowlist: string[];    // Approved real paths (must match before any I/O)
 	managedTocSource: string; // Optional writable TOC file for UI-managed local/vault mounts
 	/** Alternative TOC path tried when the primary managed TOC path is unavailable. */
@@ -142,24 +159,43 @@ export interface FolderBridgeSettings {
 	 * virtual folders, so these paths need a plugin-owned state cache.
 	 */
 	explorerExpansionState: Record<string, boolean>;
+	/** When true, writes verbose debug logs to Obsidian console. */
+	debugLogging: boolean;
+	/** Destination for new file creation: 'vault' for local vault, or a mount id. */
+	defaultCreationVault: string;
+	/** When true, adds "Copy to…" and "Move to…" items to the file context menu. */
+	enableMoveCopyMenu: boolean;
+	/** When true, enables color-coded mount highlighting in the file explorer tree. */
+	enableExplorerHighlight: boolean;
+	/** UI language: 'auto' | 'en' | 'ru'. Defaults to 'auto'. */
+	language: Language;
 }
 
-export const DEFAULT_SETTINGS: FolderBridgeSettings = {
-	mountPoints: [],
-	allowlist: [],
-	managedTocSource: '',
-	managedTocSourceFallback: undefined,
-	tocSources: [],
-	dryRun: false,
-	showStatusBar: true,
-	mountRootDeletionBehavior: 'ask',
-	deviceId: '',
-	allowForeignMounts: false,
-	maxDataUriMB: 10,
-	globalIgnorePatterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.git'],
-	hasSeenOnboarding: false,
-	explorerExpansionState: {},
-};
+	export const DEFAULT_SETTINGS: FolderBridgeSettings = {
+		mountPoints: [],
+		enableMountMerging: false,
+		vaultPriority: 1000,
+		conflictResolution: 'folders-win',
+		mountListSort: 'default',
+		allowlist: [],
+		managedTocSource: '',
+		managedTocSourceFallback: undefined,
+		tocSources: [],
+		dryRun: false,
+		showStatusBar: true,
+		mountRootDeletionBehavior: 'ask',
+		deviceId: '',
+		allowForeignMounts: false,
+		maxDataUriMB: 10,
+		globalIgnorePatterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '.git'],
+		hasSeenOnboarding: false,
+		explorerExpansionState: {},
+		debugLogging: false,
+		defaultCreationVault: 'vault',
+		enableMoveCopyMenu: true,
+		enableExplorerHighlight: false,
+		language: 'auto',
+	};
 
 export interface MountStatus {
 	mount: MountPoint;

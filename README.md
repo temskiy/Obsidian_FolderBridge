@@ -1,5 +1,96 @@
 # Folder Bridge
 
+> **⚠️ This is a modified version of the original Folder Bridge plugin (v2.15.4).** Additional functionality has been implemented to support mount priority-based conflict resolution, performance optimization for network mounts, and full bilingual UI (English / Russian).
+
+---
+
+## Internationalization (i18n)
+
+The plugin UI supports two languages: **English** and **Russian**.
+
+- **Language selector** — Settings → "Language" dropdown with three options:
+  - **Auto** (default) — follows the Obsidian / OS locale (`navigator.language`). Russian if the browser locale starts with `ru`, English otherwise.
+  - **English** — forces English UI regardless of system settings.
+  - **Russian** — forces Russian UI regardless of system settings.
+- Changing the language updates the settings page, all modals, notices, and command names instantly.
+- All UI text uses `i18n.t()` keys; English is the fallback for any missing translations.
+
+---
+
+## Extended Functionality (v2.15.4+)
+
+This modified version adds priority-based conflict resolution, performance controls, and bilingual UI support on top of the original plugin v2.15.4.
+
+### Mount Priority System
+
+When files or folders with identical paths exist in both the local vault and mounted folders (local, WebDAV, S3, SFTP), the priority system determines which version is shown:
+
+- **Priority-based conflict resolution** — each mount and the vault itself have a configurable priority number. The highest priority wins when objects with identical paths conflict.
+- **Vault priority** — configurable in Settings (default: 1000). Controls the vault's priority relative to mounted folders.
+- **Mount priority** — configurable per-mount (default: 1000). Set when creating or editing a mount.
+- **Conflict resolution rule** — when priorities are equal, choose between `folders-win` (prioritise folders) or `files-win` (prioritise files).
+- **Alphabetical tie-breaker** — when priorities and types are equal, the winner is chosen by alphabetical order of the real path.
+- **Fallback behavior** — if the highest-priority file does not exist in its mount, the system tries the next candidate in priority order.
+
+### Mount Merging Toggle
+
+For users who do not need priority-based conflict resolution (especially on slow network mounts like WebDAV or S3), an **Enable mount merging** toggle is available:
+
+- **When disabled** (default) — all I/O is delegated directly to the original adapter without priority checks. No additional network requests are made. Mounts work normally but without conflict resolution.
+- **When enabled** — full priority-based conflict resolution is active. Files from both the vault and mounts are merged with priority resolution.
+- **Performance benefit** — disabling mount merging eliminates all overhead from priority checks and fallback logic, improving responsiveness on slow network connections.
+
+### Additional Features
+
+- **Debug logging toggle** — verbose console logging for troubleshooting priority resolution (off by default).
+- **Mount list sorting** — sort the mount list in Settings by name (A→Z / Z→A) or priority (highest first / lowest first).
+- **Priority warnings** — visual warning when multiple mounts share the same priority, alerting users to potential ambiguity.
+- **Priority display** — each mount row shows `[Priority: N]` in its description.
+- **Mount tags** — assign comma-separated tags to mounts for grouping. Tags appear in the mount row as `[Tags: #tag1, #tag2]`.
+- **File explorer highlighting** — color-code files in the file tree based on their mount source. Files from the local vault are never highlighted. Each mount can have its own highlight color (8 presets + custom color picker).
+
+### Explorer File Highlighting
+
+When enabled, files from mounted folders are visually distinguished in Obsidian's file explorer with color-coded left borders and subtle background highlights.
+
+- **Global toggle** — Settings → Extended features → "Enable file explorer highlighting" (off by default). Disabling this stops all highlighting regardless of per-mount settings.
+- **Per-mount color** — Each mount has an "Explorer highlight color" option in its **Additional settings** section. Choose from 8 preset colors (Blue, Orange, Green, Red, Purple, Teal, Yellow) or click the color picker next to the dropdown to select a custom color. "None" uses the default theme style.
+- **Vault files excluded** — Files belonging to the local vault are never highlighted, even if a mount covers the same virtual path.
+- **Priority-aware** — When the same file exists in both the vault and a mount, the highlight color matches whichever source wins the priority-based conflict resolution (same logic as file display).
+- **Visual appearance** — Highlighted files get a colored left border (3px) and a subtle background tint (8% opacity of the chosen color). Hovering slightly increases the background tint to 15%.
+
+### File Transfer & Conflict Resolution
+
+Folder Bridge now supports copying and moving files between the vault and mounted folders, with full conflict resolution and large-file warnings.
+
+- **Copy to… / Move to…** — right-click any file or folder in the file explorer and choose "Copy to…" or "Move to…" from the context menu. A fuzzy-search picker shows all available destinations (vault + active mounts).
+- **Full path preservation** — when copying or moving, the complete path from the vault root is preserved in the destination. E.g. `"Хранилище 0/файл.pdf"` → `"_12/Хранилище 0/файл.pdf"`.
+- **Recursive operations** — folders and their entire contents are copied or moved recursively, including nested subfolders.
+- **Conflict resolution modal** — when a file or folder with the same name already exists at the destination, a dialog appears offering:
+  - **Overwrite** — replace the existing file/folder
+  - **Overwrite all** — replace all conflicting files/folders in the operation
+  - **Skip** — skip this file/folder and continue
+  - **Skip all** — skip all remaining conflicting files/folders
+  - **Cancel** — abort the operation
+- **Default creation vault** — Settings → "Default creation vault" lets you choose where new files are created when the path exists in multiple sources (vault or mount). Options: "Local vault" or any active mount.
+- **Large file transfer warnings** — each mount can have a per-mount threshold (in KB). When copying or moving files larger than the threshold into that mount, a confirmation modal appears showing the file name, size, destination mount, and three options: Confirm, Cancel, or Disable warnings for this mount.
+- **Vault-aware deletion** — when moving files, the source is correctly deleted from the vault (not the mount's real path) if the file physically exists in the vault, preventing orphaned files.
+
+### Mount Tags
+
+Mount tags provide a way to group and manage multiple mounts simultaneously through commands in the command palette.
+
+- **Tag assignment** — set tags when creating or editing a mount in the **Additional settings** section (collapsible panel). Tags are entered as comma-separated values, e.g. `work, backup, projects`.
+- **Default tags** — when creating a new mount, two tags are automatically suggested: `all` and the mount's label (if set). You can edit or remove them. When editing an existing mount, tags must be edited manually.
+- **Tag display** — tags appear in the mount list in Settings as plain text: `[Tags: #work, #backup]`.
+- **Tag commands** — for each unique tag found across all mounts, two commands are registered in the command palette:
+  - **`Mount #tag`** — enables all mounts with that tag.
+  - **`Unmount #tag`** — disables all mounts with that tag.
+- **Dynamic command management** — commands are automatically added when a new tag appears on any mount, and automatically hidden when the tag no longer exists on any mount. Commands use `checkCallback` to hide themselves when no mounts with the tag are found, so no manual cleanup is needed.
+- **Command prefix** — tag commands are prefixed with `#` to distinguish them from individual mount commands.
+
+---
+
 Extends Obsidian's single-root vault by letting you mount external folders as seamless, native-feeling directories inside your vault. Files stay in their original locations — no copying, no duplicating, no symlinking required.
 
 ---
@@ -485,8 +576,13 @@ npm run version  # Bump version in manifest.json and versions.json
 │   ├── OSHelpers.ts           # Platform detection and Windows helpers
 │   ├── CredentialStore.ts     # OS-keychain credential encryption (Electron safeStorage)
 │   ├── FileWatcher.ts         # chokidar-based background file watcher
+│   ├── FileTransfer.ts        # File size calculation and destination resolution
+│   ├── mountFileFilter.ts     # File type visibility filters
 │   └── ui/
-│       └── MountManagerModal.ts  # Add/edit mount dialog
+│       ├── MountManagerModal.ts    # Add/edit mount dialog
+│       ├── DestinationPickerModal.ts  # Copy/Move destination picker
+│       ├── LargeFileWarningModal.ts # Large file transfer confirmation
+│       └── ConflictResolutionModal.ts # Conflict resolution dialog
 ├── tests/                     # Vitest unit tests
 ├── manifest.json              # Plugin metadata
 ├── versions.json              # Version → minAppVersion map

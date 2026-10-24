@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from 'obsidian';
+import { i18n } from '../i18n';
 
 /**
  * First-run welcome modal shown once when Folder Bridge is loaded with no
@@ -18,49 +19,44 @@ export class WelcomeModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		const pluginName = 'Folder Bridge';
-		const quickSwitcher = 'Quick Switcher';
 
-		contentEl.createEl('h2', { text: `Welcome to ${pluginName}` });
+		contentEl.createEl('h2', { text: i18n.t('welcome.title') });
 
 		const descEl = contentEl.createDiv({ cls: 'folderbridge-welcome-desc' });
 
 		descEl.createEl('p', {
-			text: `${pluginName} lets you mount external folders into your vault as seamless, native-feeling directories, with no copying, duplication, or symlinks required.`,
+			text: i18n.t('welcome.intro'),
 		}).addClass('folderbridge-welcome-intro');
 
-		descEl.createEl('p', { text: 'What you can mount' }).addClass('folderbridge-welcome-intro');
+		descEl.createEl('p', { text: i18n.t('welcome.features') }).addClass('folderbridge-welcome-intro');
 
 		const list = descEl.createEl('ul', { cls: 'folderbridge-feature-list' });
 		for (const item of [
-			'Local folders on this device (or a connected drive)',
-			'WebDAV servers — Nextcloud, ownCloud, NAS, Synology',
-			'Folders from another Obsidian vault on this device',
+			i18n.t('welcome.feature.local'),
+			i18n.t('welcome.feature.webdav'),
+			i18n.t('welcome.feature.vault'),
 		]) {
 			list.createEl('li', { text: item, cls: 'folderbridge-feature-item' });
 		}
 
 		descEl.createEl('p', {
-			text: `Mounted folders appear instantly in the file explorer, support full-text search, ${quickSwitcher}, and all your plugins.`,
+			text: i18n.t('welcome.expanded'),
 			cls: 'setting-item-description',
 		});
 
 		const tipBox = contentEl.createDiv({ cls: 'folderbridge-tip-box' });
-		tipBox.createEl('strong', { text: '💡 quick tip: ' });
-		tipBox.appendText('After adding a mount, you can manage it from ');
-		tipBox.createEl('strong', { text: `Settings, then ${pluginName}` });
-		tipBox.appendText('. Per-mount options: read-only, custom ignore list, watcher tuning, and device-specific path overrides.');
+		tipBox.appendText(i18n.t('welcome.tip'));
 
 		new Setting(contentEl)
 			.addButton(btn => btn
-				.setButtonText('Add my first mount')
+				.setButtonText(i18n.t('welcome.btnAdd'))
 				.setCta()
 				.onClick(() => {
 					this.close();
 					this.onAddMount();
 				}))
 			.addButton(btn => btn
-				.setButtonText('I\'ll explore on my own')
+				.setButtonText(i18n.t('welcome.btnExplore'))
 				.onClick(() => {
 					this.close();
 					this.onDismiss();

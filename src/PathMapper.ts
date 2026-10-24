@@ -41,7 +41,13 @@ export class PathMapper {
 		// inside their loops.
 		this.sortedMountCache = this.mounts
 			.map(m => ({ mount: m, normalizedVirtualPath: normalizePath(m.virtualPath) }))
-			.sort((a, b) => b.normalizedVirtualPath.length - a.normalizedVirtualPath.length);
+			.sort((a, b) => {
+				// Primary sort: highest priority first (descending)
+				const priorityDiff = (b.mount.priority ?? 0) - (a.mount.priority ?? 0);
+				if (priorityDiff !== 0) return priorityDiff;
+				// Secondary sort: longest (most specific) virtual path first
+				return b.normalizedVirtualPath.length - a.normalizedVirtualPath.length;
+			});
 		const rootConfigurations = new Map(this.mounts.map(mount => [mount.id, JSON.stringify([
 			deviceId, mount.realPath, mount.fallbackRealPath, mount.deviceOverrides?.[deviceId], mount.mountType,
 		])]));
@@ -85,7 +91,12 @@ export class PathMapper {
 	 */
 	getMountByVirtualPath(virtualPath: string): MountPoint | undefined {
 		const n = normalizePath(virtualPath);
-		return this.sortedMountCache.find(({ normalizedVirtualPath }) => normalizedVirtualPath === n)?.mount;
+		// Find all mounts with exact path match, return the one with highest priority
+		const exactMatches = this.sortedMountCache
+			.filter(({ normalizedVirtualPath }) => normalizedVirtualPath === n)
+			.map(({ mount }) => mount)
+			.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+		return exactMatches[0];
 	}
 
 	/**
@@ -93,16 +104,79 @@ export class PathMapper {
 	 * mount root OR a descendant of it).  Returns undefined if the path
 	 * lives entirely inside the real vault.
 	 */
-	getMountForPath(virtualPath: string): MountPoint | undefined {
+	/**
+	 * Returns all mounts that cover the given virtual path
+	 * (the path is the mount root OR a descendant of it),
+	 * sorted by priority (highest first).
+	 * Used for conflict resolution when multiple mounts overlap.
+	 */
+	getMountsForPath(virtualPath: string): MountPoint[] {
 		const n = normalizePath(virtualPath);
-		// sortedMountCache is already sorted longest-first and pre-normalized,
-		// so no allocation or per-entry normalizePath() needed here.
-		return this.sortedMountCache.find(
-			({ normalizedVirtualPath: mv }) => n === mv || n.startsWith(mv + '/')
-		)?.mount;
+		// Collect all mounts that cover this path
+		const candidates = this.sortedMountCache
+			.filter(({ normalizedVirtualPath: mv }) => n === mv || n.startsWith(mv + '/'))
+			.map(({ mount }) => mount);
+		// Sort by priority (highest first), then by path length (longest first)
+		return candidates.sort((a, b) => {
+			const priorityDiff = (b.priority ?? 0) - (a.priority ?? 0);
+			if (priorityDiff !== 0) return priorityDiff;
+			// Equal priority: longer (more specific) path wins
+			return normalizePath(b.virtualPath).length - normalizePath(a.virtualPath).length;
+		});
+	}
+
+	getMountForPath(virtualPath: string): MountPoint | undefined {
+		// Return the mount with the highest priority that covers this path.
+		// If no mount covers it, the path belongs to the local vault.
+		const candidates = this.getMountsForPath(virtualPath);
+		return candidates.length > 0 ? candidates[0] : undefined;
 	}
 
 	/** True if virtualPath is a mount root or inside a mount. */
+	/**
+	 * Resolves conflicts between files/folders with the same name
+	 * from different sources (mounts or the local vault).
+	 *
+	 * Algorithm:
+	 * 1. Select candidates with the highest priority
+	 * 2. If multiple candidates remain, apply conflictResolution rule:
+	 *    - 'folders-win': if any folder exists, keep only folders
+	 *    - 'files-win': if any file exists, keep only files
+	 * 3. If still multiple candidates, use alphabetical order of realPath
+	 *    as the final tie-breaker (deterministic fallback).
+	 */
+	resolveConflict<T extends {
+		path: string;
+		type: 'file' | 'folder';
+		priority: number;
+		realPath: string;
+	}>(
+		candidates: T[],
+		conflictResolution: 'folders-win' | 'files-win' = 'folders-win',
+	): T | null {
+		if (candidates.length === 0) return null;
+		if (candidates.length === 1) return candidates[0];
+
+		// Step 1: Find the highest priority
+		const maxPriority = Math.max(...candidates.map(c => c.priority));
+		let winners = candidates.filter(c => c.priority === maxPriority);
+		if (winners.length === 1) return winners[0];
+	
+		// Step 2: Apply conflictResolution rule
+		if (conflictResolution === 'folders-win') {
+			const folders = winners.filter(w => w.type === 'folder');
+			if (folders.length > 0) winners = folders;
+		} else if (conflictResolution === 'files-win') {
+			const files = winners.filter(w => w.type === 'file');
+			if (files.length > 0) winners = files;
+		}
+		if (winners.length === 1) return winners[0];
+	
+		// Step 3: Final tie-breaker — alphabetical order of realPath
+		winners.sort((a, b) => a.realPath.localeCompare(b.realPath));
+		return winners[0];
+	}
+
 	isInsideMount(virtualPath: string): boolean {
 		return this.getMountForPath(virtualPath) !== undefined;
 	}

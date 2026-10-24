@@ -1,11 +1,15 @@
 import { App, DataAdapter, DataWriteOptions, FuzzySuggestModal, Plugin, PluginSettingTab, Setting, Notice, normalizePath, TAbstractFile, TFolder, TFile } from 'obsidian';
 import { FolderBridgeSettings, MountPoint, DEFAULT_SETTINGS } from './src/types';
+import { Language } from './src/i18n/types';
 import { PathMapper } from './src/PathMapper';
 import { VirtualAdapter } from './src/VirtualAdapter';
 import { SecurityManager } from './src/SecurityManager';
 import { MountManagerModal, getMountStatus, browseFolderOnDisk, browseMultipleFoldersOnDisk, VaultFolderPickerModal } from './src/ui/MountManagerModal';
 import { MountRootDeleteModal } from './src/ui/MountRootDeleteModal';
 import { WelcomeModal } from './src/ui/WelcomeModal';
+import { DestinationPickerModal } from './src/ui/DestinationPickerModal';
+import { LargeFileWarningModal } from './src/ui/LargeFileWarningModal';
+import { ConflictResolutionModal } from './src/ui/ConflictResolutionModal';
 import { checkPathAccessible, getPlatform, realPathToResourceUrl, tryReadAsDataUri } from './src/OSHelpers';
 import { FileServer } from './src/FileServer';
 import {
@@ -13,6 +17,7 @@ import {
 	saveSessionCredential, clearSessionCredential,
 	saveWebDAVPassword, clearWebDAVPassword,
 } from './src/CredentialStore';
+import { setDebugLogging } from './src/logger';
 import { FileWatcher } from './src/FileWatcher';
 import { WebDAVAdapter } from './src/WebDAVAdapter';
 import { S3Adapter } from './src/S3Adapter';
@@ -21,6 +26,8 @@ import { logger } from './src/logger';
 import { loadOptionalNodeModule } from './src/runtimeNode';
 import { replayMountContentsToVault } from './src/mountScan';
 import { parseTocConfig, serializeTocConfig } from './src/TocConfig';
+import { i18n } from './src/i18n';
+import { getAvailableDestinations } from './src/FileTransfer';
 
 // Lazy-loaded Node.js builtins — safe on Obsidian Mobile (Capacitor).
 const fs: typeof import('fs') = loadOptionalNodeModule<typeof import('fs')>('fs') ?? null as never;
@@ -83,10 +90,10 @@ function openExternalUrl(url: string): void {
 	window.open(url, '_blank', 'noopener,noreferrer');
 }
 
-function backgroundTask(task: Promise<void>, context: string, pluginName = 'Folder Bridge'): void {
+function backgroundTask(task: Promise<void>, context: string): void {
 	void task.catch(error => {
 		logger.error(`[FolderBridge] ${context}`, error);
-		new Notice(`${pluginName}: a background mount refresh failed. Check the developer console for details.`);
+		new Notice(i18n.t('status.refresh.failed'));
 	});
 }
 
@@ -117,11 +124,13 @@ export default class FolderBridgePlugin extends Plugin {
 	// Preserve original adapter so we can restore it on unload
 	private originalAdapter: unknown = null;
 	// Preserve original vault.getResourcePath so we can restore it on unload
-	private originalVaultGetResourcePath: unknown = null;
-	// Preserve original vault.create / vault.createBinary so we can restore on unload
-	private originalVaultCreate: unknown = null;
-	private originalVaultCreateBinary: unknown = null;
-	// Preserve original app.openWithDefaultApp so we can restore it on unload
+ 	private originalVaultGetResourcePath: unknown = null;
+ 	// Preserve original vault.create / vault.createBinary so we can restore on unload
+ 	private originalVaultCreate: unknown = null;
+ 	private originalVaultCreateBinary: unknown = null;
+ 	// Preserve original vault adapter (FileSystemAdapter) for direct writes to the vault
+ 	private originalVaultAdapter: import('obsidian').DataAdapter | null = null;
+ 	// Preserve original app.openWithDefaultApp so we can restore it on unload
 	private originalOpenWithDefaultApp: unknown = null;
 	statusBarItem: HTMLElement | null = null;
 	explorerObserver: MutationObserver | null = null;
@@ -140,6 +149,9 @@ export default class FolderBridgePlugin extends Plugin {
 	/** Tracks reachability per mount.id; populated by the 30-second health-check loop. */
 	mountHealthMap = new Map<string, boolean>();
 	private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
+
+	/** Stores all tag names for which commands have been registered (for cleanup). */
+	private registeredTagNames = new Set<string>();
 
 	isTocManagedMount(mount: MountPoint): boolean {
 		return typeof mount.tocSourcePath === 'string' && mount.tocSourcePath.length > 0;
@@ -264,16 +276,16 @@ export default class FolderBridgePlugin extends Plugin {
 	private async writeManagedTocMounts(mounts: MountPoint[]): Promise<boolean> {
 		const sourcePath = this.getManagedTocSourcePath();
 		if (!sourcePath) {
-			new Notice(`${this.manifest.name}: configure a managed TOC file first.`);
+			new Notice(i18n.t('toc.manage.notice.configureFirst'));
 			return false;
 		}
 		if (!fs?.promises || !path) {
-			new Notice(`${this.manifest.name}: writable TOC files are only supported on desktop builds with filesystem access.`);
+			new Notice(i18n.t('toc.manage.notice.desktopOnly'));
 			return false;
 		}
 		const unsupportedMount = mounts.find(mount => this.isCloudMount(mount));
 		if (unsupportedMount) {
-			new Notice(`Folder Bridge: Managed TOC files currently support only local and vault mounts. "${unsupportedMount.label || unsupportedMount.virtualPath}" stays in data.json.`);
+			new Notice(i18n.t('toc.manage.notice.unsupportedType', { mount: unsupportedMount.label || unsupportedMount.virtualPath }));
 			return false;
 		}
 
@@ -285,7 +297,7 @@ export default class FolderBridgePlugin extends Plugin {
 	async bindManagedTocSource(sourcePath: string): Promise<boolean> {
 		const trimmedPath = this.resolveManagedTocSourcePath(sourcePath);
 		if (!trimmedPath) {
-			new Notice(`${this.manifest.name}: managed TOC file path cannot be determined automatically. Enter an absolute path first.`);
+			new Notice(i18n.t('toc.manage.notice.noPath'));
 			return false;
 		}
 
@@ -316,7 +328,7 @@ export default class FolderBridgePlugin extends Plugin {
 					this.resolvedManagedTocSource = previousResolved;
 				}
 				const message = error instanceof Error ? error.message : String(error);
-				new Notice(`Folder Bridge: Failed to initialize managed TOC file (${message}).`);
+				new Notice(i18n.t('toc.manage.notice.initFailed', { message }));
 				return false;
 			}
 		})();
@@ -327,7 +339,7 @@ export default class FolderBridgePlugin extends Plugin {
 	async createManagedTocFromCurrentMounts(sourcePath: string): Promise<{ success: boolean; moved: number; skipped: number; targetPath: string | null }> {
 		const targetPath = this.resolveManagedTocSourcePath(sourcePath);
 		if (!targetPath) {
-			new Notice(`${this.manifest.name}: enter a managed TOC file path first.`);
+			new Notice(i18n.t('toc.manage.notice.enterPath'));
 			return { success: false, moved: 0, skipped: 0, targetPath: null };
 		}
 
@@ -360,7 +372,7 @@ export default class FolderBridgePlugin extends Plugin {
 	async migrateLocalManualMountsToManagedToc(): Promise<{ moved: number; skipped: number }> {
 		const sourcePath = this.getManagedTocSourcePath();
 		if (!sourcePath) {
-			new Notice(`${this.manifest.name}: configure a managed TOC file first.`);
+			new Notice(i18n.t('toc.manage.notice.configureFirst'));
 			return { moved: 0, skipped: 0 };
 		}
 
@@ -471,7 +483,7 @@ export default class FolderBridgePlugin extends Plugin {
 			this.updateIgnoreCache();
 			if (notifyOnWarnings) {
 				for (const warning of this.tocWarnings) {
-					new Notice(`Folder Bridge: ${warning}`);
+					new Notice(i18n.t('notice.generic', { message: warning }));
 				}
 			}
 			return;
@@ -533,13 +545,16 @@ export default class FolderBridgePlugin extends Plugin {
 
 		if (notifyOnWarnings) {
 			for (const warning of warnings) {
-				new Notice(`Folder Bridge: ${warning}`);
+				new Notice(i18n.t('notice.generic', { message: warning }));
 			}
 		}
 	}
 
 	async onload() {
 		await this.loadSettings();
+
+		// Initialize i18n after settings are loaded
+		i18n.init(this.settings.language, this.manifest.name);
 
 		this.pathMapper = new PathMapper();
 		this.security = new SecurityManager(this.settings.allowlist);
@@ -550,6 +565,10 @@ export default class FolderBridgePlugin extends Plugin {
 
 		// Install the virtual adapter shim
 		this.installVirtualAdapter();
+
+		// Initialize plugin state from saved settings
+		setDebugLogging(this.settings.debugLogging);
+		this.virtualAdapter?.setEnableMountMerging(this.settings.enableMountMerging);
 
 		// Start the localhost streaming server for video/audio in local mounts.
 		// Runs on a random available port; bound to 127.0.0.1 only.
@@ -587,13 +606,13 @@ export default class FolderBridgePlugin extends Plugin {
 		// Add a command to manually refresh mounts
 		this.addCommand({
 			id: 'refresh-mounts',
-			name: 'Refresh all mounts',
+			name: i18n.t('command.refreshMounts.name'),
 			callback: () => {
 				void (async () => {
 					for (const mount of this.settings.mountPoints.filter(m => m.enabled && this.isMountEnabledOnThisDevice(m))) {
 						await this.notifyVaultMountAdded(mount);
 					}
-					new Notice(`${this.manifest.name}: mounts refreshed`);
+					new Notice(i18n.t('status.refresh.done'));
 				})();
 			}
 		});
@@ -601,7 +620,7 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: open add-mount modal
 		this.addCommand({
 			id: 'add-mount',
-			name: 'Add mount',
+			name: i18n.t('command.addMount.name'),
 			callback: () => {
 				new MountManagerModal(this.app, this.manifest.name, this.security, (mount) => this.addMount(mount)).open();
 			},
@@ -610,7 +629,7 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: open plugin settings tab
 		this.addCommand({
 			id: 'open-settings',
-			name: 'Open settings',
+			name: i18n.t('command.openSettings.name'),
 			callback: () => {
 				(this.app as App & AppInternal).setting?.open?.();
 				(this.app as App & AppInternal).setting?.openTabById?.('folderbridge');
@@ -620,13 +639,13 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: toggle a mount (picker modal)
 		this.addCommand({
 			id: 'toggle-mount',
-			name: 'Toggle mount on/off…',
+			name: i18n.t('command.toggleMount.name'),
 			callback: () => {
 				const myMounts = this.settings.mountPoints.filter(
 					m => this.isUserEditableMount(m) && this.isMountEnabledOnThisDevice(m),
 				);
 				if (myMounts.length === 0) {
-					new Notice(`${this.manifest.name}: no mounts configured.`);
+					new Notice(i18n.t('status.mount.noMounts'));
 					return;
 				}
 				// Inline FuzzySuggestModal — avoids a separate file for a small feature
@@ -648,14 +667,14 @@ export default class FolderBridgePlugin extends Plugin {
 							this.outerPlugin.updateStatusBar();
 							if (enabling) {
 								await this.outerPlugin.notifyVaultMountAdded(m);
-								new Notice(`Folder Bridge: "${m.label || m.virtualPath}" Enabled.`);
+								new Notice(i18n.t('status.mount.enable', { mount: m.label || m.virtualPath }));
 							} else {
-								new Notice(`Folder Bridge: "${m.label || m.virtualPath}" Disabled.`);
+								new Notice(i18n.t('status.mount.disable', { mount: m.label || m.virtualPath }));
 							}
 						})();
 					}
 				})(this.app, this);
-				modal.setPlaceholder('Choose a mount to toggle on / off');
+				modal.setPlaceholder(i18n.t('command.toggleMount.placeholder'));
 				modal.open();
 			},
 		});
@@ -663,14 +682,14 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: reconnect all unreachable mounts
 		this.addCommand({
 			id: 'reconnect-mounts',
-			name: 'Reconnect unreachable mounts',
+			name: i18n.t('command.reconnectMounts.name'),
 			callback: () => {
 				void (async () => {
 					const unreachable = this.settings.mountPoints.filter(
 						m => m.enabled && !this.mountHealthMap.get(m.id),
 					);
 					if (unreachable.length === 0) {
-						new Notice(`${this.manifest.name}: all mounts are reachable.`);
+						new Notice(i18n.t('status.mount.reachable'));
 						return;
 					}
 					let reconnected = 0;
@@ -680,20 +699,26 @@ export default class FolderBridgePlugin extends Plugin {
 							reconnected++;
 						} catch { /* individual failure already noticed inside reconnectMount */ }
 					}
-					new Notice(`Folder Bridge: Reconnected ${reconnected} / ${unreachable.length} mount(s).`);
+					new Notice(i18n.t('status.mount.refresh', { reconnected, unreachable: unreachable.length }));
 				})();
 			},
 		});
 
+		// ── Tag-based mount/unmount commands ─────────────────────────────────
+		// Dynamically register commands for each unique tag found in mountPoints.
+		// Commands are named with # prefix (e.g. "#work mount/unmount") to distinguish
+		// from individual mount commands.
+		this.refreshTagCommands();
+
 		// Command: toggle read-only on ALL mounts belonging to this device
 		this.addCommand({
 			id: 'toggle-readonly-all',
-			name: 'Toggle read-only on all mounts',
+			name: i18n.t('command.toggleReadOnlyAll.name'),
 			callback: () => {
 				void (async () => {
 					const myMounts = this.settings.mountPoints.filter(m => this.isUserEditableMount(m) && m.deviceId === this.settings.deviceId);
 					if (myMounts.length === 0) {
-						new Notice(`${this.manifest.name}: no mounts configured.`);
+						new Notice(i18n.t('status.mount.noMounts'));
 						return;
 					}
 					// If any mount is currently writable, make all read-only; otherwise unlock all.
@@ -701,7 +726,9 @@ export default class FolderBridgePlugin extends Plugin {
 					for (const m of myMounts) {
 						await this.setMountReadOnly(m.id, anyWritable, /* skipNotice */ true);
 					}
-					new Notice(`Folder Bridge: All mounts are now ${anyWritable ? 'read-only' : 'writable'}.`);
+					new Notice(i18n.t('status.mount.toggle', {
+						state: anyWritable ? i18n.t('state.readOnly').toLowerCase() : i18n.t('state.writable').toLowerCase(),
+					}));
 				})();
 			},
 		});
@@ -709,27 +736,27 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: toggle read-only on a specific mount (fuzzy picker)
 		this.addCommand({
 			id: 'toggle-readonly-mount',
-			name: 'Toggle read-only on a specific mount…',
+			name: i18n.t('command.toggleReadOnlyMount.name'),
 			callback: () => {
 				const myMounts = this.settings.mountPoints.filter(
 					m => this.isUserEditableMount(m) && this.isMountEnabledOnThisDevice(m),
 				);
 				if (myMounts.length === 0) {
-					new Notice(`${this.manifest.name}: no mounts configured.`);
+					new Notice(i18n.t('status.mount.noMounts'));
 					return;
 				}
 				const modal = new (class extends FuzzySuggestModal<MountPoint> {
 					constructor(app: App, private readonly outerPlugin: FolderBridgePlugin) { super(app); }
 					getItems() { return myMounts; }
 					getItemText(m: MountPoint) {
-						const state = m.readOnly ? 'Read-only' : 'Writable';
+						const state = m.readOnly ? i18n.t('state.readOnly') : i18n.t('state.writable');
 						return `${state}  ${m.label || m.virtualPath}`;
 					}
 					onChooseItem(m: MountPoint) {
 						void this.outerPlugin.setMountReadOnly(m.id, !m.readOnly);
 					}
 				})(this.app, this);
-				modal.setPlaceholder('Choose a mount to toggle read-only.');
+				modal.setPlaceholder(i18n.t('command.toggleReadOnlyMount.placeholder'));
 				modal.open();
 			},
 		});
@@ -737,12 +764,12 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: toggle global watcher-event suppression (all mounts)
 		this.addCommand({
 			id: 'toggle-watcher-suppression-all',
-			name: 'Toggle watcher event suppression (all mounts)',
+			name: i18n.t('command.toggleWatcherAll.name'),
 			callback: () => {
 				const wasSuppressed = this.fileWatcher?.isSuppressedAll() ?? false;
 				this.setWatcherSuppressed(null, !wasSuppressed);
 				new Notice(
-					`Folder Bridge: Watcher events ${!wasSuppressed ? 'suppressed. External-sync changes will not trigger other plugins.' : 'restored. External-sync changes will trigger other plugins again.'}`
+					!wasSuppressed ? i18n.t('watcher.suppressedAll') : i18n.t('watcher.restoredAll')
 				);
 			},
 		});
@@ -750,13 +777,13 @@ export default class FolderBridgePlugin extends Plugin {
 		// Command: toggle watcher-event suppression for a specific mount
 		this.addCommand({
 			id: 'toggle-watcher-suppression-mount',
-			name: 'Toggle watcher event suppression for a specific mount…',
+			name: i18n.t('command.toggleWatcherMount.name'),
 			callback: () => {
 				const myMounts = this.settings.mountPoints.filter(
 					m => this.isMountEnabledOnThisDevice(m),
 				);
 				if (myMounts.length === 0) {
-					new Notice(`${this.manifest.name}: no mounts configured.`);
+					new Notice(i18n.t('status.mount.noMounts'));
 					return;
 				}
 				const modal = new (class extends FuzzySuggestModal<MountPoint> {
@@ -764,17 +791,20 @@ export default class FolderBridgePlugin extends Plugin {
 					getItems() { return myMounts; }
 					getItemText(m: MountPoint) {
 						const suppressed = this.outerPlugin.fileWatcher?.isSuppressed(m.id) ?? false;
-						return `${suppressed ? 'Suppressed' : 'Active'}  ${m.label || m.virtualPath}`;
+						const state = suppressed ? i18n.t('state.suppressed') : i18n.t('state.active');
+						return `${state}  ${m.label || m.virtualPath}`;
 					}
 					onChooseItem(m: MountPoint) {
 						const suppressed = this.outerPlugin.fileWatcher?.isSuppressed(m.id) ?? false;
 						this.outerPlugin.setWatcherSuppressed(m.id, !suppressed);
 						new Notice(
-							`Folder Bridge: Watcher events for "${m.label || m.virtualPath}" ${!suppressed ? 'suppressed' : 'restored'}.`
+							!suppressed
+								? i18n.t('watcher.suppressedMount', { mount: m.label || m.virtualPath })
+								: i18n.t('watcher.restoredMount', { mount: m.label || m.virtualPath })
 						);
 					}
 				})(this.app, this);
-				modal.setPlaceholder('Choose a mount to toggle watcher suppression.');
+				modal.setPlaceholder(i18n.t('command.toggleWatcherMount.placeholder'));
 				modal.open();
 			},
 		});
@@ -787,7 +817,7 @@ export default class FolderBridgePlugin extends Plugin {
 				if (file instanceof TFolder && !mount) {
 					menu.addItem((item) => {
 						item
-							.setTitle('Mount external folder here\u2026')
+							.setTitle(i18n.t('menu.mountExternalFolder'))
 							.setIcon('folder-plus')
 							.onClick(() => {
 								new MountManagerModal(
@@ -805,6 +835,29 @@ export default class FolderBridgePlugin extends Plugin {
 					});
 				}
 
+				// Copy/Move context menu items — available for all files/folders
+				if (this.settings.enableMoveCopyMenu ?? true) {
+					// "Copy to…"
+					menu.addItem((item) => {
+						item
+							.setTitle(i18n.t('menu.copyTo'))
+							.setIcon('copy')
+							.onClick(() => {
+								void this.handleCopyMove(file, 'copy');
+							});
+					});
+
+					// "Move to…"
+					menu.addItem((item) => {
+						item
+							.setTitle(i18n.t('menu.moveTo'))
+							.setIcon('arrow-right-circle')
+							.onClick(() => {
+								void this.handleCopyMove(file, 'move');
+							});
+					});
+				}
+
 				// The remaining context actions apply only inside mounted folders.
 				if (!mount) return;
 
@@ -815,7 +868,7 @@ export default class FolderBridgePlugin extends Plugin {
 				if (isMountRoot) {
 					menu.addItem((item) => {
 						item
-							.setTitle('Move mount to\u2026')
+							.setTitle(i18n.t('menu.moveMountTo'))
 							.setIcon('folder-input')
 							.onClick(() => {
 								new VaultFolderPickerModal(this.app, async (newParent) => {
@@ -832,7 +885,7 @@ export default class FolderBridgePlugin extends Plugin {
 
 				menu.addItem((item) => {
 					item
-						.setTitle(`Ignore "${file.name}" in Folder Bridge`)
+						.setTitle(i18n.t('menu.ignore', { name: file.name }))
 						.setIcon('eye-off')
 						.onClick(() => {
 							void (async () => {
@@ -840,7 +893,7 @@ export default class FolderBridgePlugin extends Plugin {
 									if (!mount.ignoreList) mount.ignoreList = [];
 									mount.ignoreList.push(file.name);
 									await this.saveSettings();
-									new Notice(`Folder Bridge: Added "${file.name}" to ignore list for mount "${mount.virtualPath}".`);
+									new Notice(i18n.t('ignore.added', { name: file.name, mount: mount.virtualPath }));
 
 									// Remove it from the vault view immediately
 									const vault = this.app.vault as typeof this.app.vault & VaultInternal;
@@ -856,7 +909,7 @@ export default class FolderBridgePlugin extends Plugin {
 										}
 									}
 								} else {
-									new Notice(`Folder Bridge: "${file.name}" is already in the ignore list for this mount.`);
+									new Notice(i18n.t('ignore.already', { name: file.name }));
 								}
 							})();
 						});
@@ -1012,7 +1065,7 @@ export default class FolderBridgePlugin extends Plugin {
 	 * Tooltip: the file explorer renders its file-count tooltip internally, so
 	 * mount details are merged into the already-open tooltip during hover.
 	 */
-	private setupExplorerHighlighting(): void {
+	setupExplorerHighlighting(): void {
 		this.teardownExplorerHighlighting();
 
 		const apply = () => this.highlightMountedInExplorer();
@@ -1060,16 +1113,19 @@ export default class FolderBridgePlugin extends Plugin {
 		}));
 	}
 
-	private teardownExplorerHighlighting(): void {
+	teardownExplorerHighlighting(): void {
 		if (this.explorerObserver) {
 			this.explorerObserver.disconnect();
 			this.explorerObserver = null;
 		}
 		this.observedExplorerEl = null;
 		for (const leaf of this.app.workspace.getLeavesOfType('file-explorer')) {
-			leaf.view.containerEl.querySelectorAll<HTMLElement>('.folderbridge-mounted, .folderbridge-mounted-child').forEach(el => {
-				el.classList.remove('folderbridge-mounted', 'folderbridge-mounted-child');
+			leaf.view.containerEl.querySelectorAll<HTMLElement>(
+				'.folderbridge-mounted, .folderbridge-mounted-child, .folderbridge-highlighted'
+			).forEach(el => {
+				el.classList.remove('folderbridge-mounted', 'folderbridge-mounted-child', 'folderbridge-highlighted');
 				el.removeAttribute('data-folderbridge-mount-type');
+				el.style.removeProperty('--highlight-color');
 				this.clearExplorerMountMetadata(el);
 			});
 		}
@@ -1258,7 +1314,7 @@ export default class FolderBridgePlugin extends Plugin {
 			if (revision === this.explorerExpansionRevision) this.explorerExpansionDirty = false;
 		} catch (error) {
 			logger.error('Folder Bridge: could not save explorer expansion state', error);
-			new Notice('Could not save folder expansion state; retrying on the next change or unload.');
+			new Notice(i18n.t('status.expansionSaveFailed'));
 		}
 	}
 
@@ -1456,6 +1512,11 @@ export default class FolderBridgePlugin extends Plugin {
 	 * details on the root folder of each mount.
 	 */
 	private highlightMountedInExplorer(): void {
+		// If global highlight is disabled — do nothing
+		if (!this.settings.enableExplorerHighlight) {
+			return;
+		}
+
 		const leaves = this.app.workspace.getLeavesOfType('file-explorer');
 		if (!leaves.length) return;
 
@@ -1510,7 +1571,7 @@ export default class FolderBridgePlugin extends Plugin {
 			}
 		});
 
-		// Also mark files inside mounted folders
+		// Process files — apply color highlight based on mount
 		explorerEl.querySelectorAll<HTMLElement>('.nav-file-title').forEach(el => {
 			const dataPath = el.getAttribute('data-path');
 			if (!dataPath) return;
@@ -1519,8 +1580,27 @@ export default class FolderBridgePlugin extends Plugin {
 			const isInMount = [...mountPaths].some(mp => normalized.startsWith(mp + '/'));
 			if (isInMount) {
 				el.classList.add('folderbridge-mounted-child');
+
+				// Get the effective mount — checks real filesystem existence, not just virtual path
+				const mount = this.virtualAdapter?.getEffectiveMountForExplorer(normalized);
+				if (mount) {
+					const color = (mount as MountPoint).highlightColor;
+					if (color && color.trim() !== '') {
+						el.classList.add('folderbridge-highlighted');
+						el.style.setProperty('--highlight-color', color);
+					} else {
+						el.classList.remove('folderbridge-highlighted');
+						el.style.removeProperty('--highlight-color');
+					}
+				} else {
+					// File belongs to local vault — no highlight
+					el.classList.remove('folderbridge-highlighted');
+					el.style.removeProperty('--highlight-color');
+				}
 			} else {
-				el.classList.remove('folderbridge-mounted-child');
+				el.classList.remove('folderbridge-mounted-child', 'folderbridge-highlighted');
+				el.removeAttribute('data-folderbridge-mount-type');
+				el.style.removeProperty('--highlight-color');
 			}
 		});
 	}
@@ -1755,25 +1835,44 @@ export default class FolderBridgePlugin extends Plugin {
 		// embedded images in mounted folders resolve to the real disk path.
 		this.originalVaultGetResourcePath = vault.getResourcePath?.bind(vault);
 		const pathMapper = this.pathMapper;
-		vault.getResourcePath = (file: TFile): string => {
-			const mount = pathMapper.getMountForPath(file.path);
-			if (mount) {
-				const realPath = pathMapper.toRealPath(file.path, mount);
-				// Modern Obsidian uses app://<vaultId>/ which is restricted to
-				// vault-relative paths — external mounts get ERR_FILE_NOT_FOUND.
-				// For video/audio: stream via localhost FileServer (supports range requests).
-				// For images/PDFs: serve as data: URI (no range needed).
-				// For everything else: fall back to app://local/ (legacy).
-				return this.virtualAdapter?.resolveResourceUrl(realPath)
-					?? tryReadAsDataUri(realPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
-					?? realPathToResourceUrl(realPath);
-			}
-			// Fallback to original vault method for non-mounted files
-			if (typeof this.originalVaultGetResourcePath === 'function') {
-				return (this.originalVaultGetResourcePath as (file: TFile) => string)(file);
-			}
-			return '';
-		};
+					vault.getResourcePath = (file: TFile): string => {
+				const mount = pathMapper.getMountForPath(file.path);
+				if (mount) {
+					const mountRealPath = pathMapper.toRealPath(file.path, mount);
+					let existsInMount = false;
+					if (!['webdav', 's3', 'sftp'].includes(mount.mountType ?? '')) {
+						try { existsInMount = fs.existsSync(mountRealPath); } catch { /* ignore */ }
+					} else {
+						existsInMount = true; // cloud mounts are authoritative
+					}
+
+					if (existsInMount) {
+						// Файл реально есть в маунте, используем его
+						return this.virtualAdapter?.resolveResourceUrl(mountRealPath)
+							?? tryReadAsDataUri(mountRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
+							?? realPathToResourceUrl(mountRealPath);
+					}
+
+					// [CRITICAL FIX] Файла НЕТ в маунте. Он принадлежит основному хранилищу.
+					// Не используем originalVaultGetResourcePath, так как кэш Obsidian может 
+					// ошибочно связывать этот file.path с маунтом. Вместо этого явно вычисляем 
+					// локальный путь и генерируем URL из него.
+					logger.debug(`[FolderBridge] getResourcePath() forcing local vault path for: "${file.path}"`);
+					const adapter = this.app.vault.adapter as any;
+					const basePath = typeof adapter.getBasePath === 'function' ? adapter.getBasePath() : '';
+					const localRealPath = path.join(basePath, file.path.replace(/\//g, path.sep));
+
+					return this.virtualAdapter?.resolveResourceUrl(localRealPath)
+						?? tryReadAsDataUri(localRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
+						?? realPathToResourceUrl(localRealPath);
+				}
+
+				// Fallback для файлов, которые вообще не подпадают под маунты
+				if (typeof this.originalVaultGetResourcePath === 'function') {
+					return (this.originalVaultGetResourcePath as (file: TFile) => string)(file);
+				}
+				return '';
+			};
 
 		// Patch app.openWithDefaultApp() to use the real filesystem path for
 		// mounted files.  Without this, Obsidian constructs a path relative to
@@ -1787,16 +1886,24 @@ export default class FolderBridgePlugin extends Plugin {
 			if (mount && !['webdav', 's3', 'sftp'].includes(mount.mountType ?? '')) {
 				// Local mount: pass the real OS path directly to the shell
 				const realPath = pathMapper.toRealPath(nPath, mount);
-				try {
-					const electron = loadOptionalNodeModule<ElectronModule>('electron');
-					const shellApi: ElectronShell | undefined = electron?.shell ?? electron?.default?.shell;
-					shellApi?.openPath(realPath).catch((e: unknown) => {
-						logger.warn('[Folder Bridge] openWithDefaultApp shell.openPath failed:', e);
-					});
-				} catch (e) {
-					logger.warn('[Folder Bridge] openWithDefaultApp: electron not available', e);
+				// [BUGFIX] Check if file actually exists in mount before using mount path.
+				// When a root mount covers all paths, primary vault files would
+				// resolve to the mount's path where they don't exist.
+				let existsInMount = false;
+				try { existsInMount = fs.existsSync(realPath); } catch { /* ignore */ }
+				if (existsInMount) {
+					try {
+						const electron = loadOptionalNodeModule<ElectronModule>('electron');
+						const shellApi: ElectronShell | undefined = electron?.shell ?? electron?.default?.shell;
+						shellApi?.openPath(realPath).catch((e: unknown) => {
+							logger.warn('[Folder Bridge] openWithDefaultApp shell.openPath failed:', e);
+						});
+					} catch (e) {
+						logger.warn('[Folder Bridge] openWithDefaultApp: electron not available', e);
+					}
+					return;
 				}
-				return;
+				logger.debug(`[FolderBridge] openWithDefaultApp() file not in mount, fallback: "${filePath}"`);
 			}
 			// Non-mounted or cloud file: fall through to original
 			if (typeof this.originalOpenWithDefaultApp === 'function') {
@@ -1819,6 +1926,8 @@ export default class FolderBridgePlugin extends Plugin {
 		// 2. If the TFile is not in the vault's fileMap after that call, we perform
 		//    a manual write + immediate vault.onChange('file-created', …) so the TFile
 		//    is present and a newly-opened tab immediately shows the new note.
+		// Save the original vault adapter BEFORE patching vault.create
+		this.originalVaultAdapter = vault.adapter;
 		this.originalVaultCreate = vault.create?.bind(vault);
 		this.originalVaultCreateBinary = vault.createBinary?.bind(vault);
 
@@ -1828,7 +1937,100 @@ export default class FolderBridgePlugin extends Plugin {
 
 		(vault as unknown as PatchedVault).create = async (path: string, data: string, options?: unknown): Promise<TFile | null> => {
 			const nPath = normalizePath(path);
-			if (!this.pathMapper.getMountForPath(nPath)) {
+			const srcMount = this.pathMapper.getMountForPath(nPath);
+
+			// If the path belongs to a mount, check if we should redirect to defaultCreationVault
+			let finalPath = nPath;
+			let isVaultRedirect = false;
+			if (srcMount) {
+				const defaultVault = this.settings.defaultCreationVault ?? 'vault';
+				if (defaultVault === 'vault') {
+					// Redirect to local vault — keep the full virtual path as-is
+					// The local vault has the same folder structure as the virtual path
+					// (e.g. virtual "Хранилище 0/Заметки/..." → local "Хранилище 0/Заметки/...")
+					finalPath = nPath;
+					isVaultRedirect = true;
+					logger.debug(`[FolderBridge] vault.create: redirecting to vault (full path: "${finalPath}")`);
+				} else if (defaultVault === 'mounts') {
+					// Create in the mount with highest priority — let the existing priority system handle it
+					// No redirect needed, just use the original path
+					logger.debug(`[FolderBridge] vault.create: using priority system (defaultCreationVault=mounts)`);
+				}
+				// Legacy: if defaultVault is a specific mount id, redirect to that mount
+				// (kept for backward compatibility)
+			}
+
+			// Handle vault redirection (path may be unchanged)
+			if (isVaultRedirect) {
+				// Create in the redirected path (local vault)
+				// Ensure parent directory exists (Obsidian requires it)
+				const parentDir = finalPath.substring(0, finalPath.lastIndexOf('/'));
+				if (parentDir && !await vault.adapter.exists(parentDir)) {
+					try {
+						await vault.adapter.mkdir(parentDir);
+					} catch {
+						// Directory may already exist or be read-only
+					}
+				}
+
+				// For vault redirection, use original adapter directly (not VirtualAdapter)
+				const origAdapter = (this.virtualAdapter as any).orig?.();
+				if (origAdapter) {
+					try {
+						await origAdapter.write(finalPath, data, options as DataWriteOptions | undefined);
+					} catch {
+						// File may already have been written
+					}
+				} else {
+					// Fallback: use vault.adapter (may route through mounts)
+					try {
+						await vault.adapter.write(finalPath, data, options as DataWriteOptions | undefined);
+					} catch {
+						// File may already have been written
+					}
+				}
+				// Register the file with Obsidian and open it
+				const stat = await vault.adapter.stat(finalPath);
+				if (stat && typeof vault.onChange === 'function') {
+					await vault.onChange('file-created', normalizePath(finalPath), null, stat);
+				}
+				const created = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+				if (created instanceof TFile) {
+					// Open the file in a new tab
+					await this.app.workspace.openLinkText(normalizePath(finalPath), normalizePath(finalPath), 'split');
+					return created;
+				}
+				return null;
+			}
+
+			if (finalPath !== nPath) {
+				// Create in the redirected mount path
+				// Ensure parent directory exists (Obsidian requires it)
+				const parentDir = finalPath.substring(0, finalPath.lastIndexOf('/'));
+				if (parentDir && !await vault.adapter.exists(parentDir)) {
+					try {
+						await vault.adapter.mkdir(parentDir);
+					} catch {
+						// Directory may already exist or be read-only
+					}
+				}
+
+				// For mount redirection, use originalVaultCreate
+				const result = await (this.originalVaultCreate as OrigVaultCreate)(finalPath, data, options);
+				if (result) return result;
+
+				// Update tree
+				const existing = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+				if (existing instanceof TFile) return existing;
+				const stat = await vault.adapter.stat(finalPath);
+				if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(normalizePath(finalPath))) {
+					await vault.onChange('file-created', normalizePath(finalPath), null, stat);
+				}
+				const created = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+				return created instanceof TFile ? created : null;
+			}
+
+			if (!srcMount) {
 				return (this.originalVaultCreate as OrigVaultCreate)(path, data, options);
 			}
 
@@ -1866,7 +2068,87 @@ export default class FolderBridgePlugin extends Plugin {
 
 		(vault as unknown as PatchedVault).createBinary = async (path: string, data: ArrayBuffer, options?: unknown): Promise<TFile | null> => {
 			const nPath = normalizePath(path);
-			if (!this.pathMapper.getMountForPath(nPath)) {
+			const srcMount = this.pathMapper.getMountForPath(nPath);
+
+			// If the path belongs to a mount, check if we should redirect to defaultCreationVault
+			let finalPath = nPath;
+			let isVaultRedirect = false;
+			if (srcMount) {
+				const defaultVault = this.settings.defaultCreationVault ?? 'vault';
+				if (defaultVault === 'vault') {
+					// Redirect to local vault — keep the full virtual path as-is
+					// The local vault has the same folder structure as the virtual path
+					finalPath = nPath;
+					isVaultRedirect = true;
+					logger.debug(`[FolderBridge] vault.createBinary: redirecting to vault (full path: "${finalPath}")`);
+				} else if (defaultVault === 'mounts') {
+					// Create in the mount with highest priority — let the existing priority system handle it
+					// No redirect needed, just use the original path
+					logger.debug(`[FolderBridge] vault.createBinary: using priority system (defaultCreationVault=mounts)`);
+				}
+				// Legacy: if defaultVault is a specific mount id, redirect to that mount
+				// (kept for backward compatibility)
+			}
+
+			if (finalPath !== nPath) {
+				// Create in the redirected path
+				// Ensure parent directory exists (Obsidian requires it)
+				const parentDir = finalPath.substring(0, finalPath.lastIndexOf('/'));
+				if (parentDir && !await vault.adapter.exists(parentDir)) {
+					try {
+						await vault.adapter.mkdir(parentDir);
+					} catch {
+						// Directory may already exist or be read-only
+					}
+				}
+
+				if (isVaultRedirect && this.virtualAdapter) {
+					// For vault redirection, use original adapter directly (not VirtualAdapter)
+					const origAdapter = (this.virtualAdapter as any).orig?.();
+					if (origAdapter) {
+						try {
+							await origAdapter.writeBinary(finalPath, data, options as DataWriteOptions | undefined);
+						} catch {
+							// File may already have been written
+						}
+					} else {
+						// Fallback: use vault.adapter (may route through mounts)
+						try {
+							await vault.adapter.writeBinary(finalPath, data, options as DataWriteOptions | undefined);
+						} catch {
+							// File may already have been written
+						}
+					}
+					// Register the file with Obsidian and open it
+					const stat = await vault.adapter.stat(finalPath);
+					if (stat && typeof vault.onChange === 'function') {
+						await vault.onChange('file-created', normalizePath(finalPath), null, stat);
+					}
+					const created = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+					if (created instanceof TFile) {
+						// Open the file in a new tab
+						await this.app.workspace.openLinkText(normalizePath(finalPath), normalizePath(finalPath), 'split');
+						return created;
+					}
+					return null;
+				} else {
+					// For mount redirection, use originalVaultCreateBinary
+					const result = await (this.originalVaultCreateBinary as OrigVaultCreateBinary)(finalPath, data, options);
+					if (result) return result;
+				}
+
+				// Update tree
+				const existing = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+				if (existing instanceof TFile) return existing;
+				const stat = await vault.adapter.stat(finalPath);
+				if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(normalizePath(finalPath))) {
+					await vault.onChange('file-created', normalizePath(finalPath), null, stat);
+				}
+				const created = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+				return created instanceof TFile ? created : null;
+			}
+
+			if (!srcMount) {
 				return (this.originalVaultCreateBinary as OrigVaultCreateBinary)(path, data, options);
 			}
 
@@ -1907,14 +2189,14 @@ export default class FolderBridgePlugin extends Plugin {
 		// Validate against existing mounts; cloud mounts skip local-path validation
 		const error = this.security.validateMount(mountData, existingMounts);
 		if (error) {
-			new Notice(`Folder Bridge: ${error}`);
+			new Notice(i18n.t('notice.generic', { message: error }));
 			return;
 		}
 		if (!isCloud) {
 			// Surface advisory warnings (UNC paths, real-path overlaps) for local mounts
 			const warnings = this.security.getPathWarnings(mountData.realPath, existingMounts, mountType);
 			for (const w of warnings) {
-				new Notice(`Folder Bridge warning: ${w}`, 10_000);
+				new Notice(i18n.t('notice.warning', { message: w }), 10_000);
 			}
 		}
 
@@ -2027,10 +2309,633 @@ export default class FolderBridgePlugin extends Plugin {
 		} else {
 			mountLabel = `"${runtimeMount.realPath}" → "${runtimeMount.virtualPath}"`;
 		}
-		new Notice(`Folder Bridge: Mounted ${mountLabel}`);
+		new Notice(i18n.t('status.mounted.label', { mount: mountLabel }));
+		// Refresh tag-based commands after adding a new mount (may have new tags)
+		this.refreshTagCommands();
 	}
 
-	async removeMount(id: string): Promise<void> {
+	/**
+	 * Determine the storage type of a virtual path: vault or a specific mount.
+	 * Checks physical existence, not virtual routing.
+	 */
+	private async resolveStorageType(virtualPath: string): Promise<'vault' | MountPoint> {
+		logger.debug(`[FolderBridge] resolveStorageType: ${virtualPath}`);
+		// Check if file physically exists in any mount
+		const mounts = this.pathMapper.getMountsForPath(virtualPath);
+		logger.debug(`[FolderBridge] resolveStorageType: found ${mounts.length} mounts for path`);
+		
+		for (const mount of mounts) {
+			logger.debug(`[FolderBridge] resolveStorageType: checking mount ${mount.virtualPath}`);
+			if (VirtualAdapter.isCloudMount(mount)) {
+				// For cloud mounts, use va.exists
+				const va = this.virtualAdapter;
+				if (va && await va.exists(virtualPath)) {
+					logger.debug(`[FolderBridge] resolveStorageType: cloud mount has file, returning mount`);
+					return mount;
+				}
+			} else {
+				// Check physical existence in mount
+				const realPath = this.pathMapper.toRealPath(virtualPath, mount);
+				logger.debug(`[FolderBridge] resolveStorageType: checking real path: ${realPath}`);
+				try {
+					await fs.promises.access(realPath, fs.constants.F_OK);
+					logger.debug(`[FolderBridge] resolveStorageType: file exists in mount ${mount.virtualPath}`);
+					return mount;
+				} catch {
+					logger.debug(`[FolderBridge] resolveStorageType: file NOT in mount ${mount.virtualPath}`);
+					// File doesn't exist in this mount
+				}
+			}
+		}
+		// Default: vault
+		logger.debug(`[FolderBridge] resolveStorageType: not found in any mount, returning vault`);
+		return 'vault';
+	}
+
+	/**
+	 * Get the real filesystem path for a virtual path.
+	 * Returns the vault base path if the file is in the vault,
+	 * or the mount's real path if it's in a mount.
+	 */
+	private async resolveRealPath(virtualPath: string, storageType?: 'vault' | MountPoint): Promise<string> {
+		// If storageType is not provided, determine it
+		const st = storageType ?? await this.resolveStorageType(virtualPath);
+		logger.debug(`[FolderBridge] resolveRealPath: ${virtualPath} -> storageType: ${typeof st === 'string' ? st : st.virtualPath}`);
+		
+		if (st === 'vault') {
+			// Get vault base path
+			const vaultAdapter = this.app.vault.adapter;
+			const vaultAdapterTyped = vaultAdapter as { basePath?: string; adapter?: { getBasePath?: () => string } };
+			const basePath = vaultAdapterTyped.basePath
+				?? vaultAdapterTyped.adapter?.getBasePath?.()
+				?? '';
+			const realPath = path.join(basePath, virtualPath.replace(/\//g, path.sep));
+			logger.debug(`[FolderBridge] resolveRealPath: vault real path: ${realPath}`);
+			return realPath;
+		} else {
+			const realPath = this.pathMapper.toRealPath(virtualPath, st);
+			logger.debug(`[FolderBridge] resolveRealPath: mount real path: ${realPath}`);
+			return realPath;
+		}
+	}
+
+	/**
+	 * Recursively calculate folder size in KB using VirtualAdapter.
+	 * Works regardless of whether files are in vault or mount.
+	 */
+
+	private async calculateFolderSize(va: VirtualAdapter, folderPath: string): Promise<number> {
+		let totalBytes = 0;
+		const MAX_ENTRIES = 100000;
+		let count = 0;
+
+		try {
+			const listing = await va.list(folderPath);
+			const allEntries = [...listing.files, ...listing.folders];
+
+			for (const entry of allEntries) {
+				if (count >= MAX_ENTRIES) break;
+				count++;
+
+				const entryPath = normalizePath(folderPath + '/' + entry);
+				const stat = await va.stat(entryPath);
+
+				if (stat) {
+					if (stat.type === 'folder') {
+						totalBytes += await this.calculateFolderSize(va, entryPath);
+					} else {
+						totalBytes += stat.size;
+					}
+				}
+			}
+		} catch {
+			// Folder doesn't exist or can't be listed
+		}
+
+		return Math.ceil(totalBytes / 1024);
+	}
+
+	/**
+	 * Recursively count files in a folder to know total conflicts upfront.
+	 */
+	private async countFiles(va: VirtualAdapter, folderPath: string): Promise<number> {
+		let count = 0;
+		try {
+			const listing = await va.list(folderPath);
+			const allEntries = [...listing.files, ...listing.folders];
+
+			for (const entry of allEntries) {
+				const entryPath = normalizePath(folderPath + '/' + entry);
+				const stat = await va.stat(entryPath);
+				if (stat && stat.type === 'folder') {
+					count += await this.countFiles(va, entryPath);
+				} else {
+					count++;
+				}
+			}
+		} catch {
+			// Folder doesn't exist
+		}
+		return count;
+	}
+
+	// ------------------------------------------------------------------
+	// Copy/Move context menu handler
+	// ------------------------------------------------------------------
+
+		async handleCopyMove(file: TAbstractFile, operation: 'copy' | 'move'): Promise<void> {
+			// Show destination picker
+			const onChoose = async (dest: import('./src/FileTransfer').DestinationOption) => {
+				// Check if destination is reachable
+				if (!dest.reachable) {
+					new Notice(i18n.t('copy.dest.unreachable', { dest: dest.name }));
+					return;
+				}
+
+				// Determine source mount
+				const srcMount = this.pathMapper.getMountForPath(file.path);
+
+				// Resolve destination mount
+				let dstMount: MountPoint | null = null;
+				if (dest.id !== 'vault') {
+					dstMount = this.settings.mountPoints.find(m => m.id === dest.id && m.enabled) ?? null;
+				}
+
+				// Determine destination storage type based on selected destination (not physical existence)
+				const dstStorageType: 'vault' | MountPoint = dest.id === 'vault' ? 'vault' : (dstMount ?? 'vault');
+				logger.debug(`[FolderBridge] handleCopyMove: dstStorageType from dest.id=${dest.id}: ${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
+
+				// Calculate source size for large file warning using VirtualAdapter
+				let sizeKB = 0;
+				try {
+					const va = this.virtualAdapter;
+					if (va) {
+						const stat = await va.stat(file.path);
+						if (stat) {
+							if (stat.type === 'folder') {
+								// For folders, calculate total size recursively using VirtualAdapter
+								sizeKB = await this.calculateFolderSize(va, file.path);
+							} else {
+								// For files, use stat.size directly
+								sizeKB = Math.ceil(stat.size / 1024);
+							}
+						}
+					}
+				} catch {
+					// Size calculation failed — proceed with 0
+				}
+
+				// Check large file warning for destination mount
+				if (dstMount && dstMount.enableLargeFileConfirm && sizeKB > (dstMount.largeFileThresholdKB ?? 1024)) {
+					const confirmed = await LargeFileWarningModal.show(
+						this.app,
+						file.name,
+						sizeKB,
+						dstMount,
+						operation as 'create' | 'copy' | 'move',
+						async (mount) => {
+							await this.updateMount(mount.id, mount);
+						},
+					);
+					if (!confirmed) return;
+				}
+
+				// Build destination virtual path (preserve source path structure)
+				const dstVirtualPath = await this.buildDestinationVirtualPath(file, dest, srcMount);
+				logger.debug(`[FolderBridge] handleCopyMove: file=${file.path}, operation=${operation}, dest=${dest.name}`);
+				logger.debug(`[FolderBridge] handleCopyMove: dstVirtualPath=${dstVirtualPath}`);
+
+				// Execute copy or move with conflict handling
+				try {
+					const va = this.virtualAdapter;
+					if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+
+					// Count total conflicts upfront
+					let totalConflicts = 0;
+					if (file instanceof TFolder) {
+						totalConflicts = await this.countConflicts(va, file.path, dstVirtualPath, dstStorageType);
+					} else {
+						const dstRealPath = await this.resolveRealPath(dstVirtualPath, dstStorageType);
+						try {
+							await fs.promises.access(dstRealPath, fs.constants.F_OK);
+							totalConflicts = 1;
+						} catch {
+							totalConflicts = 0;
+						}
+					}
+					logger.debug(`[FolderBridge] handleCopyMove: totalConflicts=${totalConflicts}`);
+
+					const conflictState = {
+						skipAll: false,
+						overwriteAll: false,
+						totalConflicts,
+						currentConflict: 0,
+					};
+
+					if (operation === 'copy') {
+						await this.recursiveCopy(file.path, dstVirtualPath, file.path, dstVirtualPath, dstStorageType, conflictState);
+						new Notice(i18n.t('copy.copied', { file: file.name, dest: dest.name }));
+					} else {
+						await this.recursiveMove(file.path, dstVirtualPath, file.path, dstVirtualPath, dstStorageType, conflictState);
+						new Notice(i18n.t('move.moved', { file: file.name, dest: dest.name }));
+					}
+
+					// Refresh the vault tree
+					await this.refreshTocMountSources(true);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					new Notice(i18n.t('copy.move.failed', {
+						op: operation === 'copy' ? i18n.t('copy.op') : i18n.t('move.op'),
+						message,
+					}));
+					logger.error(`[FolderBridge] ${operation} failed for "${file.path}":`, error);
+				}
+			};
+
+			new DestinationPickerModal(this.app, this, file, operation, onChoose).open();
+		}
+
+		/**
+		 * Count potential conflicts between source and destination paths.
+		 * Checks physical existence using resolveStorageType and resolveRealPath.
+		 */
+		private async countConflicts(va: VirtualAdapter, srcPath: string, dstPath: string, dstStorageType?: 'vault' | MountPoint): Promise<number> {
+			let count = 0;
+			try {
+				const stat = await va.stat(srcPath);
+				if (stat && stat.type === 'folder') {
+					const listing = await va.list(srcPath);
+					const allEntries = [...listing.files, ...listing.folders];
+
+					for (const entry of allEntries) {
+						const entrySrcPath = normalizePath(srcPath + '/' + entry);
+						const entryName = entry.split('/').pop()!.split('\\').pop()!;
+						const entryDstPath = normalizePath(dstPath + '/' + entryName);
+
+						const entryStat = await va.stat(entrySrcPath);
+						if (entryStat && entryStat.type === 'folder') {
+							count += await this.countConflicts(va, entrySrcPath, entryDstPath, dstStorageType);
+						} else {
+							// Check physical existence in destination
+							const entryDstStorageType = dstStorageType;
+							const dstRealPath = await this.resolveRealPath(entryDstPath, entryDstStorageType);
+							try {
+								await fs.promises.access(dstRealPath, fs.constants.F_OK);
+								count++;
+							} catch {
+								// File doesn't physically exist
+							}
+						}
+					}
+				} else {
+					// Check physical existence in destination
+					const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+					try {
+						await fs.promises.access(dstRealPath, fs.constants.F_OK);
+						count++;
+					} catch {
+						// File doesn't physically exist
+					}
+				}
+			} catch {
+				// Path doesn't exist
+			}
+			return count;
+		}
+
+		/**
+		 * Build the destination virtual path preserving the source path structure.
+		 * Preserves the full path from vault root, prepended with destination mount.
+		 * E.g. "Хранилище 0/файл.pdf" → "_12/Хранилище 0/файл.pdf"
+		 */
+		private async buildDestinationVirtualPath(
+			file: TAbstractFile,
+			dest: import('./src/FileTransfer').DestinationOption,
+			srcMount: MountPoint | undefined,
+		): Promise<string> {
+			logger.debug(`[FolderBridge] buildDestinationVirtualPath: file.path=${file.path}, dest.id=${dest.id}`);
+			const mount = this.settings.mountPoints.find(m => m.id === dest.id && m.enabled);
+
+			if (dest.id === 'vault') {
+				// For vault destination, preserve the full path from vault root
+				logger.debug(`[FolderBridge] buildDestinationVirtualPath: dest is vault, returning file.path as-is: ${file.path}`);
+				return normalizePath(file.path);
+			}
+
+			if (!mount) return normalizePath(file.path);
+
+			// Check if file is already inside the destination mount
+			const destMountVirtual = normalizePath(mount.virtualPath);
+			const fileNormalized = normalizePath(file.path);
+
+			// If file is already inside the destination mount, preserve relative path from mount root
+			if (fileNormalized.startsWith(destMountVirtual + '/') || fileNormalized === destMountVirtual) {
+				const relPath = fileNormalized.startsWith(destMountVirtual + '/')
+					? fileNormalized.slice(destMountVirtual.length + 1)
+					: '';
+				return relPath ? normalizePath(destMountVirtual + '/' + relPath) : destMountVirtual;
+			}
+
+			// File is outside the destination mount — preserve full path from vault root
+			return normalizePath(destMountVirtual + '/' + file.path);
+		}
+
+		/**
+		 * Recursively copy a file or folder from source to destination.
+		 * Uses relative paths to avoid duplication in recursive calls.
+		 * Handles conflicts when destination already exists.
+		 */
+		private async recursiveCopy(
+			srcPath: string,
+			dstPath: string,
+			rootSrcPath: string,
+			rootDstPath: string,
+			dstStorageType: 'vault' | MountPoint,
+			conflictState: { skipAll: boolean; overwriteAll: boolean; totalConflicts: number; currentConflict: number },
+		): Promise<void> {
+			const va = this.virtualAdapter;
+			if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+
+			// Resolve storage types and real paths for source and destination
+			const srcStorageType = await this.resolveStorageType(srcPath);
+			const srcRealPath = await this.resolveRealPath(srcPath);
+			const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+
+			logger.debug(`[FolderBridge] recursiveCopy: srcPath=${srcPath}, dstPath=${dstPath}`);
+			logger.debug(`[FolderBridge] recursiveCopy: srcStorageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}, dstStorageType=${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
+			logger.debug(`[FolderBridge] recursiveCopy: srcRealPath=${srcRealPath}, dstRealPath=${dstRealPath}`);
+
+			// Check if destination exists and user wants to skip/overwrite
+			if (!conflictState.skipAll) {
+				let dstExists = false;
+				try {
+					logger.debug(`[FolderBridge] recursiveCopy: checking if dst exists: ${dstRealPath}`);
+					await fs.promises.access(dstRealPath, fs.constants.F_OK);
+					dstExists = true;
+					logger.debug(`[FolderBridge] recursiveCopy: dst EXISTS`);
+				} catch {
+					dstExists = false;
+					logger.debug(`[FolderBridge] recursiveCopy: dst does NOT exist`);
+				}
+
+				if (dstExists) {
+					conflictState.currentConflict++;
+					logger.debug(`[FolderBridge] recursiveCopy: CONFLICT #${conflictState.currentConflict}/${conflictState.totalConflicts}, showing dialog`);
+					if (!conflictState.overwriteAll) {
+						const resolution = await ConflictResolutionModal.show(
+							this.app,
+							dstPath.split('/').pop()!,
+							'copy',
+							conflictState.totalConflicts,
+							conflictState.currentConflict - 1,
+						);
+
+						if (resolution === 'skip' || resolution === 'skipAll') {
+							if (resolution === 'skipAll') conflictState.skipAll = true;
+							logger.debug(`[FolderBridge] recursiveCopy: user chose ${resolution}, skipping`);
+							return;
+						}
+						if (resolution === 'overwriteAll') conflictState.overwriteAll = true;
+						logger.debug(`[FolderBridge] recursiveCopy: user chose ${resolution}, continuing`);
+					}
+				}
+			}
+
+			// Use stat to distinguish files from folders
+			const stat = await va.stat(srcPath);
+			logger.debug(`[FolderBridge] recursiveCopy: src is ${stat?.type}`);
+			if (stat && stat.type === 'folder') {
+				// Create destination folder
+				logger.debug(`[FolderBridge] recursiveCopy: creating folder: ${dstRealPath}`);
+				await fs.promises.mkdir(dstRealPath, { recursive: true });
+
+				// List contents and copy each item
+				const listing = await va.list(srcPath);
+				const allEntries = [...listing.files, ...listing.folders];
+				logger.debug(`[FolderBridge] recursiveCopy: folder has ${allEntries.length} entries`);
+
+				for (const entry of allEntries) {
+					// Extract just the filename from entry
+					const entryName = entry.split('/').pop()!.split('\\').pop()!;
+					const entrySrcPath = normalizePath(srcPath + '/' + entryName);
+					// Calculate relative path from root source to get the relative destination
+					const relPath = entrySrcPath.slice(rootSrcPath.length + 1);
+					const entryDstPath = normalizePath(rootDstPath + '/' + relPath);
+					logger.debug(`[FolderBridge] recursiveCopy: processing entry: ${entryName} -> ${entryDstPath}`);
+					await this.recursiveCopy(entrySrcPath, entryDstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
+				}
+			} else {
+				// Copy file based on storage types
+				logger.debug(`[FolderBridge] recursiveCopy: copying file, srcType===dstType: ${srcStorageType === dstStorageType}`);
+				if (srcStorageType === dstStorageType) {
+					// Same storage type — use appropriate copy method
+					logger.debug(`[FolderBridge] recursiveCopy: using same-type copy`);
+					if (srcStorageType === 'vault') {
+						// Both in vault — use fs.copyFile with real paths
+						// (va.copy() would try to route through mount which may not have the file)
+						logger.debug(`[FolderBridge] recursiveCopy: vault->vault using fs.copyFile`);
+						logger.debug(`[FolderBridge] recursiveCopy: srcRealPath=${srcRealPath}`);
+						logger.debug(`[FolderBridge] recursiveCopy: dstRealPath=${dstRealPath}`);
+						await fs.promises.copyFile(srcRealPath, dstRealPath);
+					} else {
+						// Same mount — use native copy
+						logger.debug(`[FolderBridge] recursiveCopy: mount->mount using va.copy`);
+						await va.copy(srcPath, dstPath);
+					}
+				} else {
+					// Different storage types — read from source, write to destination
+					logger.debug(`[FolderBridge] recursiveCopy: using read/write (different storage types)`);
+					let content: Buffer;
+					if (srcStorageType === 'vault') {
+						logger.debug(`[FolderBridge] recursiveCopy: reading from vault`);
+						const vaultAdapter = this.app.vault.adapter;
+						content = Buffer.from(await vaultAdapter.read(srcPath));
+					} else {
+						logger.debug(`[FolderBridge] recursiveCopy: reading from mount: ${srcRealPath}`);
+						content = await fs.promises.readFile(srcRealPath);
+					}
+
+					if (dstStorageType === 'vault') {
+						logger.debug(`[FolderBridge] recursiveCopy: writing to vault: ${dstRealPath}`);
+						// Use fs.promises.writeFile directly — va.writeBinary() would select by priority (mount wins)
+						await fs.promises.mkdir(path.dirname(dstRealPath), { recursive: true });
+						await fs.promises.writeFile(dstRealPath, content);
+					} else {
+						logger.debug(`[FolderBridge] recursiveCopy: writing to mount: ${dstRealPath}`);
+						await fs.promises.mkdir(path.dirname(dstRealPath), { recursive: true });
+						await fs.promises.writeFile(dstRealPath, content);
+					}
+				}
+			}
+		}
+
+		/**
+		 * Recursively move a file or folder from source to destination.
+		 * Uses relative paths to avoid duplication in recursive calls.
+		 * Handles conflicts when destination already exists.
+		 */
+		private async recursiveMove(
+			srcPath: string,
+			dstPath: string,
+			rootSrcPath: string,
+			rootDstPath: string,
+			dstStorageType: 'vault' | MountPoint,
+			conflictState: { skipAll: boolean; overwriteAll: boolean; totalConflicts: number; currentConflict: number },
+		): Promise<void> {
+			const va = this.virtualAdapter;
+			if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+
+			// Resolve storage types and real paths for source and destination
+			const srcStorageType = await this.resolveStorageType(srcPath);
+			const srcRealPath = await this.resolveRealPath(srcPath);
+			const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+
+			logger.debug(`[FolderBridge] recursiveMove: srcPath=${srcPath}, dstPath=${dstPath}`);
+			logger.debug(`[FolderBridge] recursiveMove: srcStorageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}, dstStorageType=${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
+
+			// Check if destination exists and user wants to skip/overwrite
+			if (!conflictState.skipAll) {
+				let dstExists = false;
+				try {
+					logger.debug(`[FolderBridge] recursiveMove: checking if dst exists: ${dstRealPath}`);
+					await fs.promises.access(dstRealPath, fs.constants.F_OK);
+					dstExists = true;
+					logger.debug(`[FolderBridge] recursiveMove: dst EXISTS`);
+				} catch {
+					dstExists = false;
+					logger.debug(`[FolderBridge] recursiveMove: dst does NOT exist`);
+				}
+
+				if (dstExists) {
+					conflictState.currentConflict++;
+					logger.debug(`[FolderBridge] recursiveMove: CONFLICT #${conflictState.currentConflict}/${conflictState.totalConflicts}, showing dialog`);
+					if (!conflictState.overwriteAll) {
+						const resolution = await ConflictResolutionModal.show(
+							this.app,
+							dstPath.split('/').pop()!,
+							'move',
+							conflictState.totalConflicts,
+							conflictState.currentConflict - 1,
+						);
+
+						if (resolution === 'skip' || resolution === 'skipAll') {
+							if (resolution === 'skipAll') conflictState.skipAll = true;
+							logger.debug(`[FolderBridge] recursiveMove: user chose ${resolution}, skipping`);
+							return;
+						}
+						if (resolution === 'overwriteAll') conflictState.overwriteAll = true;
+						logger.debug(`[FolderBridge] recursiveMove: user chose ${resolution}, continuing`);
+					}
+				}
+			}
+
+			// Use stat to distinguish files from folders
+			const stat = await va.stat(srcPath);
+			logger.debug(`[FolderBridge] recursiveMove: src is ${stat?.type}`);
+			if (stat && stat.type === 'folder') {
+				// For folders, try atomic rename first (same storage type)
+				logger.debug(`[FolderBridge] recursiveMove: same storage type: ${srcStorageType === dstStorageType}`);
+				if (srcStorageType === dstStorageType && srcStorageType !== 'vault') {
+					// Same mount — use atomic rename
+					logger.debug(`[FolderBridge] recursiveMove: using atomic rename for folder`);
+					await va.rename(srcPath, dstPath);
+					return;
+				}
+
+				// Different storage types or vault involved — copy then delete
+				logger.debug(`[FolderBridge] recursiveMove: using copy+delete for folder`);
+				await this.recursiveCopy(srcPath, dstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
+				await this.recursiveDelete(srcPath, srcStorageType);
+			} else {
+				// Move file
+				logger.debug(`[FolderBridge] recursiveMove: moving file, same storage type: ${srcStorageType === dstStorageType}`);
+				if (srcStorageType === dstStorageType) {
+					// Same storage type — use appropriate rename method
+					logger.debug(`[FolderBridge] recursiveMove: using same-type rename`);
+					if (srcStorageType === 'vault') {
+						// Both in vault — use fs.rename with real paths
+						logger.debug(`[FolderBridge] recursiveMove: vault->vault using fs.rename`);
+						await fs.promises.rename(srcRealPath, dstRealPath);
+					} else {
+						// Same mount — use atomic rename
+						logger.debug(`[FolderBridge] recursiveMove: mount->mount using va.rename`);
+						await va.rename(srcPath, dstPath);
+					}
+				} else {
+					// Different storage types — copy then delete
+					logger.debug(`[FolderBridge] recursiveMove: using copy+delete for file`);
+					await this.recursiveCopy(srcPath, dstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
+					await this.recursiveDelete(srcPath, srcStorageType);
+				}
+			}
+		}
+
+		/**
+		 * Recursively delete a file or folder.
+		 * Uses the resolved storage type to delete from the correct location.
+		 */
+	private async recursiveDelete(deletePath: string, srcStorageType: 'vault' | MountPoint): Promise<void> {
+		const va = this.virtualAdapter;
+		if (!va) return;
+
+		logger.debug(`[FolderBridge] recursiveDelete: path=${deletePath}, storageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}`);
+
+		// Use stat to distinguish files from folders
+		const stat = await va.stat(deletePath);
+		logger.debug(`[FolderBridge] recursiveDelete: ${deletePath} is ${stat?.type}`);
+
+		if (stat && stat.type === 'folder') {
+			const listing = await va.list(deletePath);
+			const allEntries = [...listing.files, ...listing.folders];
+			logger.debug(`[FolderBridge] recursiveDelete: folder has ${allEntries.length} entries`);
+
+			for (const entry of allEntries) {
+				const entryPath = normalizePath(deletePath + '/' + entry);
+				const entryStorageType = await this.resolveStorageType(entryPath);
+				await this.recursiveDelete(entryPath, entryStorageType);
+			}
+
+			// Delete empty folder
+			let realPath: string;
+			if (srcStorageType === 'vault') {
+				const vaultAdapter = this.app.vault.adapter;
+				const vaultAdapterTyped = vaultAdapter as { basePath?: string; adapter?: { getBasePath?: () => string } };
+				const basePath = vaultAdapterTyped.basePath
+					?? vaultAdapterTyped.adapter?.getBasePath?.()
+					?? '';
+				realPath = path.join(basePath, deletePath.replace(/\//g, path.sep));
+			} else {
+				realPath = this.pathMapper.toRealPath(deletePath, srcStorageType);
+			}
+			logger.debug(`[FolderBridge] recursiveDelete: deleting folder: ${realPath}`);
+			try {
+				await fs.promises.rmdir(realPath);
+			} catch {
+				// Folder may already be empty or deleted
+			}
+		}
+
+		// Delete the file
+		let realPath: string;
+		if (srcStorageType === 'vault') {
+			const vaultAdapter = this.app.vault.adapter;
+			const vaultAdapterTyped = vaultAdapter as { basePath?: string; adapter?: { getBasePath?: () => string } };
+			const basePath = vaultAdapterTyped.basePath
+				?? vaultAdapterTyped.adapter?.getBasePath?.()
+				?? '';
+			realPath = path.join(basePath, deletePath.replace(/\//g, path.sep));
+		} else {
+			realPath = this.pathMapper.toRealPath(deletePath, srcStorageType);
+		}
+		logger.debug(`[FolderBridge] recursiveDelete: deleting file: ${realPath}`);
+		try {
+			await fs.promises.unlink(realPath);
+		} catch {
+			// File may already be deleted
+		}
+	}
+
+		async removeMount(id: string): Promise<void> {
 		const idx = this.persistedMountPoints.findIndex(m => m.id === id);
 		if (idx === -1) {
 			const managedIndex = this.getManagedTocIndex(id);
@@ -2050,7 +2955,7 @@ export default class FolderBridgePlugin extends Plugin {
 			await this.refreshTocMountSources(true);
 			await this.saveSettings();
 			this.updateStatusBar();
-			new Notice(`Folder Bridge: Removed mount "${mount.virtualPath}".`);
+			new Notice(i18n.t('status.mounts.removed', { path: mount.virtualPath }));
 			return;
 		}
 
@@ -2122,7 +3027,10 @@ export default class FolderBridgePlugin extends Plugin {
 			await this.saveSettings();
 			this.syncEffectiveMountState();
 			if (!skipNotice) {
-				new Notice(`Folder Bridge: “${mount.label || mount.virtualPath}” is now ${readOnly ? 'read-only' : 'writable'}.`);
+				new Notice(i18n.t('status.mount.readOnlyState', {
+					mount: mount.label || mount.virtualPath,
+					state: readOnly ? i18n.t('state.readOnly').toLowerCase() : i18n.t('state.writable').toLowerCase(),
+				}));
 			}
 			return;
 		}
@@ -2142,7 +3050,10 @@ export default class FolderBridgePlugin extends Plugin {
 		await this.saveSettings();
 		const updatedMount = this.settings.mountPoints.find(existing => existing.id === id);
 		if (!skipNotice && updatedMount) {
-			new Notice(`Folder Bridge: “${updatedMount.label || updatedMount.virtualPath}” is now ${readOnly ? 'read-only' : 'writable'}.`);
+			new Notice(i18n.t('status.mount.readOnlyState', {
+				mount: updatedMount.label || updatedMount.virtualPath,
+				state: readOnly ? i18n.t('state.readOnly').toLowerCase() : i18n.t('state.writable').toLowerCase(),
+			}));
 		}
 	}
 
@@ -2177,7 +3088,7 @@ export default class FolderBridgePlugin extends Plugin {
 			const otherMounts = this.settings.mountPoints.filter(m => m.id !== id);
 			const error = this.security.validateMount(newData, otherMounts);
 			if (error) {
-				new Notice(`Folder Bridge: ${error}`);
+				new Notice(i18n.t('notice.generic', { message: error }));
 				return;
 			}
 
@@ -2231,7 +3142,7 @@ export default class FolderBridgePlugin extends Plugin {
 				this.fileWatcher?.startWatching(updatedMount);
 			}
 
-			new Notice(`Folder Bridge: Updated "${updatedMount.virtualPath}".`);
+			new Notice(i18n.t('status.mounts.updated', { path: updatedMount.virtualPath }));
 			return;
 		}
 
@@ -2241,7 +3152,7 @@ export default class FolderBridgePlugin extends Plugin {
 		const otherMounts = this.settings.mountPoints.filter(m => m.id !== id);
 		const error = this.security.validateMount(newData, otherMounts);
 		if (error) {
-			new Notice(`Folder Bridge: ${error}`);
+			new Notice(i18n.t('notice.generic', { message: error }));
 			return;
 		}
 
@@ -2390,7 +3301,101 @@ export default class FolderBridgePlugin extends Plugin {
 			this.fileWatcher?.startWatching(updatedMount);
 		}
 
-		new Notice(`Folder Bridge: Updated "${updatedMount.virtualPath}".`);
+		new Notice(i18n.t('status.mounts.updated', { path: updatedMount.virtualPath }));
+		// Refresh tag-based commands after updating a mount (tags may have changed)
+		this.refreshTagCommands();
+	}
+
+	/**
+	 * Removes previously registered tag commands and re-registers them.
+	 * Used when the interface language changes so command names are re-localized.
+	 */
+	public rebuildTagCommands(): void {
+		for (const id of this.registeredTagNames) {
+			this.removeCommand(id);
+		}
+		this.registeredTagNames.clear();
+		this.refreshTagCommands();
+	}
+
+	private refreshTagCommands(): void {
+		// Collect all unique tags from current mounts
+		const allTags = new Set<string>();
+		for (const mount of this.settings.mountPoints) {
+			if (mount.tags && mount.tags.length > 0) {
+				for (const tag of mount.tags) {
+					const trimmed = tag.trim();
+					if (trimmed) allTags.add(trimmed);
+				}
+			}
+		}
+
+		// Register commands for current tags (only once per tag)
+		for (const tag of allTags) {
+			const tagName = tag;
+			const mountCmdId = `mount-tag-${tagName}`;
+			const unmountCmdId = `unmount-tag-${tagName}`;
+
+			// Only register if not already registered
+			if (!this.registeredTagNames.has(mountCmdId)) {
+				// Mount command — hidden if no mounts with this tag exist
+				this.addCommand({
+					id: mountCmdId,
+					name: i18n.t('command.tagMountOn.name', { tag: tagName }),
+					checkCallback: (checking: boolean) => {
+						const mountsWithTag = this.settings.mountPoints.filter(
+							m => m.tags && m.tags.includes(tagName) && this.isUserEditableMount(m) && this.isMountEnabledOnThisDevice(m),
+						);
+						if (mountsWithTag.length === 0) return false;
+						if (!checking) {
+							void (async () => {
+								for (const mount of mountsWithTag) {
+									if (mount.enabled) continue;
+									mount.enabled = true;
+									await this.persistEditableMountFromState(mount);
+									await this.notifyVaultMountAdded(mount);
+								}
+								this.updateStatusBar();
+								new Notice(
+									i18n.t('command.tagMount.on', { tag: tagName, count: mountsWithTag.length }),
+								);
+							})();
+						}
+						return true;
+					},
+				});
+
+				// Unmount command — hidden if no mounts with this tag exist
+				this.addCommand({
+					id: unmountCmdId,
+					name: i18n.t('command.tagMountOff.name', { tag: tagName }),
+					checkCallback: (checking: boolean) => {
+						const mountsWithTag = this.settings.mountPoints.filter(
+							m => m.tags && m.tags.includes(tagName) && this.isUserEditableMount(m) && this.isMountEnabledOnThisDevice(m),
+						);
+						if (mountsWithTag.length === 0) return false;
+						if (!checking) {
+							void (async () => {
+								for (const mount of mountsWithTag) {
+									if (!mount.enabled) continue;
+									await this.notifyVaultMountRemoved(mount);
+									mount.enabled = false;
+									await this.persistEditableMountFromState(mount);
+								}
+								this.updateStatusBar();
+								new Notice(
+									i18n.t('command.tagMount.off', { tag: tagName, count: mountsWithTag.length }),
+								);
+							})();
+						}
+						return true;
+					},
+				});
+
+				this.registeredTagNames.add(mountCmdId);
+				this.registeredTagNames.add(unmountCmdId);
+			}
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -2439,7 +3444,7 @@ export default class FolderBridgePlugin extends Plugin {
 		// Recursively notify Obsidian about all files and folders inside the mount
 		const suppressionEnabled = !!mount.watcherSuppressAllEvents;
 
-		const notice = new Notice(`Folder Bridge: Scanning and mounting "${mount.virtualPath}"...`, 0);
+		const notice = new Notice(i18n.t('status.scanning', { path: mount.virtualPath }), 0);
 		let lastProgressRender = -Infinity;
 		const { fileCount, folderCount, scanLimitHit } = await replayMountContentsToVault(mount, {
 			list: (folderPath) => isCurrent() ? this.app.vault.adapter.list(folderPath) : Promise.resolve({ files: [], folders: [] }),
@@ -2453,10 +3458,14 @@ export default class FolderBridgePlugin extends Plugin {
 				const now = performance.now();
 				if (now - lastProgressRender < 100) return;
 				lastProgressRender = now;
-				notice.setMessage(`Folder Bridge: Scanning "${mount.virtualPath}"... ${folderCount} folders, ${fileCount} files`);
+				notice.setMessage(i18n.t('status.scanningProgress', {
+					path: mount.virtualPath,
+					folderCount,
+					fileCount,
+				}));
 			},
 			onHugeMount: () => {
-				if (isCurrent()) notice.setMessage(`Folder Bridge: "${mount.virtualPath}" is very large. This may take a moment...`);
+				if (isCurrent()) notice.setMessage(i18n.t('status.hugeMount', { path: mount.virtualPath }));
 			},
 			onError: (folderPath, error) => {
 				logger.debug(`Folder Bridge: Failed to list ${folderPath}`, error);
@@ -2466,15 +3475,14 @@ export default class FolderBridgePlugin extends Plugin {
 		if (scanLimitHit) {
 			const scanLimit = mount.maxFiles ?? 0;
 			new Notice(
-				`Folder Bridge: Scan limit (${scanLimit.toLocaleString()} items) reached for "${mount.virtualPath}". ` +
-				`Increase "Max files" in mount advanced settings to surface more.`,
+				i18n.t('status.scanLimitReached', { limit: scanLimit.toLocaleString(), path: mount.virtualPath }),
 				10000
 			);
 		}
 		if (suppressionEnabled) {
-			new Notice(`Folder Bridge: Mounted "${mount.virtualPath}" with external file events suppressed.`);
+			new Notice(i18n.t('status.mounted.withEventsSuppressed', { path: mount.virtualPath }));
 		} else {
-			new Notice(`Folder Bridge: Mounted ${folderCount} folders and ${fileCount} files in "${mount.virtualPath}".`);
+			new Notice(i18n.t('status.mounted.count', { path: mount.virtualPath, count: folderCount, fileCount }));
 			try {
 				await vault.onChange('raw', normalizePath(mount.virtualPath), null, null);
 			} catch (e) {
@@ -2511,69 +3519,71 @@ export default class FolderBridgePlugin extends Plugin {
 		const token = Symbol();
 		this.mountInjections.set(mount.id, token);
 		const isCurrent = () => this.mountInjections.get(mount.id) === token;
-		// [FEATURE_20260222] Stop watching the mount for external changes
 		this.fileWatcher?.stopWatching(mount);
 
 		const vault = this.app.vault as typeof this.app.vault & VaultInternal;
 		if (typeof vault.onChange !== 'function') return;
 
 		const nPath = normalizePath(mount.virtualPath);
+		logger.warn(`[FolderBridge] notifyVaultMountRemoved: virtualPath="${mount.virtualPath}", nPath="${nPath}"`);
+
 		const mountFolder = this.app.vault.getAbstractFileByPath(nPath);
-		if (!mountFolder) return;
+			if (!mountFolder || !(mountFolder instanceof TFolder)) return;
 
-		const files: TAbstractFile[] = [];
-		const foldersByDepth: TFolder[][] = [];
-		const collectChildren = (folder: TFolder, depth: number): void => {
-			for (const child of [...folder.children]) {
-				if (child instanceof TFolder) {
-					(foldersByDepth[depth] ??= []).push(child);
-					collectChildren(child, depth + 1);
-				} else {
-					files.push(child);
+			const notice = new Notice(i18n.t('status.removing', { path: mount.virtualPath }), 0);
+			let removedCount = 0;
+
+			// [SMART FIX] Получаем доступ к оригинальному адаптеру основного хранилища
+			const origAdapter = (this.app.vault.adapter as any).orig?.() || (this as any).originalAdapter;
+			
+			const collectAndRemove = async (folder: TFolder): Promise<void> => {
+				for (const child of [...folder.children]) {
+					if (!isCurrent()) return;
+					
+					// Проверяем, существует ли этот файл/папка в ОСНОВНОМ хранилище
+					let existsInPrimary = false;
+					try {
+						existsInPrimary = await origAdapter.exists(child.path);
+					} catch (e) {
+						logger.debug(`Folder Bridge: Error checking primary existence for ${child.path}`, e);
+					}
+					
+					if (!existsInPrimary) {
+						// Файла нет в основном хранилище, значит он добавлен маунтом. Безопасно удаляем из индекса.
+						try {
+							if (child instanceof TFolder) {
+								await collectAndRemove(child); // Сначала рекурсивно чистим содержимое
+								await vault.onChange('folder-removed', child.path, null, null);
+							} else {
+								await vault.onChange('file-removed', child.path, null, null);
+							}
+							removedCount++;
+						} catch (e) {
+							logger.debug('Folder Bridge: Failed to remove item from vault view', e);
+						}
+					} else if (child instanceof TFolder) {
+						// Файл/папка есть в основном хранилище, не удаляем её.
+						// Но рекурсивно проверяем её содержимое, вдруг там есть файлы только из маунта.
+						await collectAndRemove(child);
+					}
 				}
-			}
-		};
-		if (mountFolder instanceof TFolder) collectChildren(mountFolder, 0);
-		const notice = new Notice(`Folder Bridge: Removing "${mount.virtualPath}"...`, 0);
-		let removedCount = 0;
-		const removeBatch = async (entries: TAbstractFile[], event: string): Promise<void> => {
-			for (let offset = 0; offset < entries.length && isCurrent(); offset += 32) {
-				const results = await Promise.allSettled(entries.slice(offset, offset + 32).map(async entry => {
-					if (!isCurrent() || this.app.vault.getAbstractFileByPath(entry.path) !== entry) return;
-					await vault.onChange(event, entry.path, null, null);
-					removedCount++;
-				}));
-				const failure = results.find(result => result.status === 'rejected');
-				if (failure?.status === 'rejected') throw failure.reason;
-				if (isCurrent()) notice.setMessage(`Folder Bridge: Removing "${mount.virtualPath}"... ${removedCount} items removed`);
-			}
-		};
-		try {
-			await removeBatch(files, 'file-removed');
-			for (const folders of foldersByDepth.reverse()) {
-				if (!isCurrent()) return;
-				await removeBatch(folders, 'folder-removed');
-			}
-			if (!isCurrent() || this.app.vault.getAbstractFileByPath(nPath) !== mountFolder) return;
+			};
+
 			try {
-				await vault.onChange('folder-removed', nPath, null, null);
-			} catch (error) {
-				logger.debug('Folder Bridge: vault.onChange(folder-removed) unavailable', error);
-				return;
+				await collectAndRemove(mountFolder);
+				
+				if (!isCurrent() || this.app.vault.getAbstractFileByPath(nPath) !== mountFolder) return;
+				
+				if (isCurrent()) new Notice(i18n.t('status.unmounted.cleaned', { path: mount.virtualPath, count: removedCount }));
+			} finally {
+				notice.hide();
 			}
-			if (isCurrent()) new Notice(`Folder Bridge: Unmounted "${mount.virtualPath}".`);
-		} finally {
-			notice.hide();
+
+			// Refresh file-explorer highlights after mount removal
+			this.scheduleExplorerWork(() => {
+				if (isCurrent()) this.highlightMountedInExplorer();
+			}, 200);
 		}
-
-		// Refresh file-explorer highlights after mount removal
-		this.scheduleExplorerWork(() => {
-			if (isCurrent()) this.highlightMountedInExplorer();
-		}, 200);
-	}
-
-	// ------------------------------------------------------------------
-	// Ignore-list helpers
 	// ------------------------------------------------------------------
 
 	/**
@@ -2714,7 +3724,7 @@ export default class FolderBridgePlugin extends Plugin {
 		this.mountHealthMap.set(mount.id, reachable);
 
 		if (!reachable) {
-			new Notice(`Folder Bridge: "${mount.label || mount.virtualPath}" is still unreachable.`, 5000);
+			new Notice(i18n.t('status.mount.stillUnreachable', { mount: mount.label || mount.virtualPath }), 5000);
 			this.updateStatusBar();
 			return;
 		}
@@ -2722,7 +3732,7 @@ export default class FolderBridgePlugin extends Plugin {
 		// Clean up any stale vault-tree remnants before re-injecting
 		await this.notifyVaultMountRemoved(mount);
 		await this.notifyVaultMountAdded(mount);
-		new Notice(`Folder Bridge: "${mount.label || mount.virtualPath}" reconnected successfully.`);
+		new Notice(i18n.t('status.mount.reconnected', { mount: mount.label || mount.virtualPath }));
 		this.updateStatusBar();
 	}
 
@@ -2769,15 +3779,15 @@ export default class FolderBridgePlugin extends Plugin {
 		const unreachableCount = [...this.mountHealthMap.values()].filter(v => v === false).length;
 		const allSuppressed = this.fileWatcher?.isSuppressedAll() ?? false;
 		if (allSuppressed) {
-			this.statusBarItem.setText(`${this.manifest.name}: events paused`);
+			this.statusBarItem.setText(i18n.t('statusBar.eventsPaused', { plugin: this.manifest.name }));
 			this.statusBarItem.classList.remove('folderbridge-status-warning');
 			this.statusBarItem.classList.add('folderbridge-status-suppressed');
 		} else if (unreachableCount > 0) {
-			this.statusBarItem.setText(`Folder Bridge: ${unreachableCount} unreachable`);
+			this.statusBarItem.setText(i18n.t('statusBar.unreachable', { count: unreachableCount }));
 			this.statusBarItem.classList.remove('folderbridge-status-suppressed');
 			this.statusBarItem.classList.add('folderbridge-status-warning');
 		} else {
-			this.statusBarItem.setText(`Folder Bridge: ${active} mount${active !== 1 ? 's' : ''}`);
+			this.statusBarItem.setText(i18n.t('statusBar.mounts', { count: active }));
 			this.statusBarItem.classList.remove('folderbridge-status-suppressed', 'folderbridge-status-warning');
 		}
 	}
@@ -2807,6 +3817,23 @@ export default class FolderBridgePlugin extends Plugin {
 			if (!m.id) m.id = generateId();
 			// Back-compat: assign deviceId to mounts created before deviceId existed
 			if (!m.deviceId) m.deviceId = this.settings.deviceId;
+			// Back-compat: assign default priority to mounts created before priority field existed
+			if (m.priority === undefined || m.priority === null || typeof m.priority !== 'number') {
+				m.priority = 0;
+			}
+		}
+
+		// Back-compat: enableMountMerging defaults to false for existing users
+		this.settings.enableMountMerging = this.settings.enableMountMerging ?? false;
+
+		// Back-compat: enableExplorerHighlight defaults to false for existing users
+		this.settings.enableExplorerHighlight = this.settings.enableExplorerHighlight ?? false;
+
+		// Back-compat: assign default highlightColor to mounts created before the field existed
+		for (const m of this.persistedMountPoints) {
+			if (m.highlightColor === undefined || m.highlightColor === null) {
+				m.highlightColor = '';
+			}
 		}
 
 		// Back-compat: migrate global ignoreList to per-mount ignoreList
@@ -2873,11 +3900,6 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		const pluginName = this.plugin.manifest.name;
-		const toc = 'TOC';
-		const syncthing = 'Syncthing';
-		const mb = 'MB';
-		const dataUri = 'data: URI';
-		const dsStore = '.DS_Store';
 		const ctrlCmd = 'Ctrl / Cmd';
 		const ghRepo = 'repo';
 		const moreProj = 'projects';
@@ -2888,25 +3910,50 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		const infoDiv = containerEl.createDiv('folderbridge-info-box');
 
 		infoDiv.createEl('p', {
-			text: `Platform: ${getPlatform()} | Device ID: ${this.plugin.settings.deviceId.substring(0, 8)}`,
+			text: i18n.t('syncWarning.header', {
+				platform: getPlatform(),
+				deviceId: this.plugin.settings.deviceId.substring(0, 8),
+			}),
 			cls: 'setting-item-description folderbridge-info-meta',
 		});
 
 		const syncWarning = infoDiv.createEl('p', {
 			cls: 'setting-item-description folderbridge-sync-warning',
 		});
-		syncWarning.createEl('strong', { text: 'Sync warning:' });
-		syncWarning.appendText(' If you use Obsidian Sync or Syncthing, you ');
-		syncWarning.createEl('strong', { text: 'Must' });
-		syncWarning.appendText(' add your virtual folder names to your sync ignore list (e.g. ');
-		syncWarning.createEl('code', { text: '.stignore' });
-		syncWarning.appendText(' or Obsidian Sync Excluded Folders). Otherwise, your sync engine will try to upload the entire contents of your mounted folders!');
+		syncWarning.createEl('strong', { text: i18n.t('syncWarning.pluginNameHeader') });
+		syncWarning.appendText(' ');
+		syncWarning.appendText(i18n.t('syncWarning.body'));
+
+		// ── Language selector ───────────────────────────────────────────────
+		const currentLanguage = this.plugin.settings.language;
+
+		new Setting(containerEl)
+			.setName(i18n.t('settings.language.name'))
+			.setDesc(i18n.t('settings.language.desc'))
+			.addDropdown(dropdown => {
+				dropdown.addOption('auto', i18n.t('settings.language.auto'));
+				dropdown.addOption('en', i18n.t('settings.language.en'));
+				dropdown.addOption('ru', i18n.t('settings.language.ru'));
+				dropdown.setValue(currentLanguage ?? 'auto');
+				dropdown.onChange(val => {
+					void (async () => {
+						this.plugin.settings.language = val as Language;
+						await this.plugin.saveSettings();
+						// Reinitialize i18n with new language
+						i18n.init(this.plugin.settings.language, this.plugin.manifest.name);
+						// Re-register tag commands so their names are re-localized
+						this.plugin.rebuildTagCommands();
+						// Refresh the settings tab to apply changes
+						this.renderSync();
+					})();
+				});
+			});
 
 		// ── Global options ───────────────────────────────────────────────
 
 		new Setting(containerEl)
-			.setName('Dry-run mode')
-			.setDesc('Log write operations to the console without executing them. Useful for debugging.')
+			.setName(i18n.t('settings.dryRun.name'))
+			.setDesc(i18n.t('settings.dryRun.desc'))
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.dryRun)
 				.onChange(val => {
@@ -2918,8 +3965,34 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Show status bar item')
-			.setDesc('Display the active mount count in Obsidian\'s status bar.')
+			.setName(i18n.t('settings.enableMountMerging.name'))
+			.setDesc(i18n.t('settings.enableMountMerging.desc'))
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableMountMerging)
+				.onChange(val => {
+					void (async () => {
+						this.plugin.settings.enableMountMerging = val;
+						await this.plugin.saveSettings();
+						this.plugin.virtualAdapter?.setEnableMountMerging(val);
+					})();
+				}));
+
+		new Setting(containerEl)
+			.setName(i18n.t('settings.debugLogging.name'))
+			.setDesc(i18n.t('settings.debugLogging.desc'))
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.debugLogging)
+				.onChange(val => {
+					void (async () => {
+						this.plugin.settings.debugLogging = val;
+						await this.plugin.saveSettings();
+						this.plugin.virtualAdapter?.setDebugLogging(val);
+					})();
+				}));
+
+		new Setting(containerEl)
+			.setName(i18n.t('settings.showStatusBar.name'))
+			.setDesc(i18n.t('settings.showStatusBar.desc'))
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.showStatusBar)
 				.onChange(val => {
@@ -2945,12 +4018,12 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Mount root deletion behavior')
-			.setDesc('What should happen when you delete a mounted folder from the file explorer?')
+			.setName(i18n.t('settings.mountRootDeletionBehavior.name'))
+			.setDesc(i18n.t('settings.mountRootDeletionBehavior.desc'))
 			.addDropdown(drop => drop
-				.addOption('ask', 'Ask me every time')
-				.addOption('unmount', 'Unmount only (keep real files)')
-				.addOption('delete', 'Delete permanently (destroy real files)')
+				.addOption('ask', i18n.t('settings.mountRootDeletionBehavior.options.ask'))
+				.addOption('unmount', i18n.t('settings.mountRootDeletionBehavior.options.unmount'))
+				.addOption('delete', i18n.t('settings.mountRootDeletionBehavior.options.delete'))
 				.setValue(this.plugin.settings.mountRootDeletionBehavior)
 				.onChange((val: 'ask' | 'unmount' | 'delete') => {
 					void (async () => {
@@ -2961,8 +4034,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Allow foreign mounts')
-			.setDesc(`Allow mounting paths created on other devices. Enable this if you use ${syncthing} to sync the actual mounted folders across devices and the paths are identical.`)
+			.setName(i18n.t('settings.allowForeignMounts.name'))
+			.setDesc(i18n.t('settings.allowForeignMounts.desc'))
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.allowForeignMounts)
 				.onChange(val => {
@@ -2974,10 +4047,10 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName(`Image / PDF size cap (${mb})`)
-			.setDesc(`Maximum file size that will be embedded as a ${dataUri} (used for images and PDFs in external mounts). Files larger than this fall back to a resource URL. Default: 10 ${mb}.`)
+			.setName(i18n.t('settings.maxDataUriMB.name'))
+			.setDesc(i18n.t('settings.maxDataUriMB.desc'))
 			.addText(text => text
-				.setPlaceholder('10')
+				.setPlaceholder(i18n.t('settings.maxDataUriMB.placeholder'))
 				.setValue(String(this.plugin.settings.maxDataUriMB ?? 10))
 				.onChange(val => {
 					void (async () => {
@@ -2988,31 +4061,119 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 							this.plugin.virtualAdapter?.setMaxDataUri(parsed * 1024 * 1024);
 						}
 					})();
+				}));
 
-					new Setting(containerEl)
-						.setName(`Support ${pluginName}`)
-						.setDesc('Follow ongoing work, browse other projects, or star the repository on GitHub.')
-						.addButton(btn => btn
-							.setButtonText(`GitHub ${ghRepo}`)
-							.setTooltip(`Open the ${pluginName} repository`)
-							.onClick(() => openExternalUrl(GITHUB_REPO_URL)))
-						.addButton(btn => btn
-							.setButtonText(`More ${moreProj}`)
-							.setTooltip('Open the author GitHub profile')
-							.onClick(() => openExternalUrl(GITHUB_PROFILE_URL)))
-						.addButton(btn => btn
-							.setButtonText(`☕ Buy ${buyMe}`)
-							.setTooltip('Support development with a coffee')
-							.onClick(() => openExternalUrl(BUY_ME_COFFEE_URL)));
+		new Setting(containerEl)
+			.setName(i18n.t('settings.support.name', { plugin: pluginName }))
+			.setDesc(i18n.t('settings.support.desc'))
+			.addButton(btn => btn
+				.setButtonText(`GitHub ${ghRepo}`)
+				.setTooltip(i18n.t('settings.support.repo.tooltip', { plugin: pluginName }))
+				.onClick(() => openExternalUrl(GITHUB_REPO_URL)))
+			.addButton(btn => btn
+				.setButtonText(`More ${moreProj}`)
+				.setTooltip(i18n.t('settings.support.profile.tooltip'))
+				.onClick(() => openExternalUrl(GITHUB_PROFILE_URL)))
+			.addButton(btn => btn
+				.setButtonText(`☕ Buy ${buyMe}`)
+				.setTooltip(i18n.t('settings.support.coffee.tooltip'))
+				.onClick(() => openExternalUrl(BUY_ME_COFFEE_URL)));
+
+		// ── Extended features ────────────────────────────────────────────
+		new Setting(containerEl).setName(i18n.t('settings.extensions')).setHeading();
+
+		new Setting(containerEl)
+			.setName(i18n.t('settings.enableMoveCopyMenu.name'))
+			.setDesc(i18n.t('settings.enableMoveCopyMenu.desc'))
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableMoveCopyMenu)
+				.onChange(val => {
+					void (async () => {
+						this.plugin.settings.enableMoveCopyMenu = val;
+						await this.plugin.saveSettings();
+					})();
+				}));
+
+		if (this.plugin.settings.enableMountMerging) {
+			new Setting(containerEl)
+				.setName(i18n.t('settings.vaultPriority.name'))
+				.setDesc(i18n.t('settings.vaultPriority.desc'))
+				.addText(text => {
+					text.inputEl.type = 'number';
+					text.inputEl.min = '0';
+					text.inputEl.addClass('folderbridge-input-narrow');
+					text.setPlaceholder(i18n.t('settings.vaultPriority.placeholder'))
+						.setValue(String(this.plugin.settings.vaultPriority ?? 1000))
+						.onChange(val => {
+							const n = parseInt(val, 10);
+							void (async () => {
+								this.plugin.settings.vaultPriority = isNaN(n) || n < 0 ? 1000 : n;
+								await this.plugin.saveSettings();
+								this.plugin.virtualAdapter?.setVaultPriority(this.plugin.settings.vaultPriority);
+							})();
+						});
+				});
+			new Setting(containerEl)
+				.setName(i18n.t('settings.conflictResolution.name'))
+				.setDesc(i18n.t('settings.conflictResolution.desc'))
+				.addDropdown(drop => drop
+					.addOption('folders-win', i18n.t('settings.conflictResolution.foldersWin'))
+					.addOption('files-win', i18n.t('settings.conflictResolution.filesWin'))
+					.setValue(this.plugin.settings.conflictResolution ?? 'folders-win')
+					.onChange(val => {
+						void (async () => {
+							this.plugin.settings.conflictResolution = val as 'folders-win' | 'files-win';
+							await this.plugin.saveSettings();
+							this.plugin.virtualAdapter?.setConflictResolution(this.plugin.settings.conflictResolution);
+						})();
+					}));
+		} else {
+			containerEl.createEl('p', {
+				text: i18n.t('settings.priorityDisabled'),
+				cls: 'setting-item-description',
+			});
+		}
+
+// Transfer & Creation settings
+		new Setting(containerEl)
+			.setName(i18n.t('settings.defaultCreationVault.name'))
+			.setDesc(i18n.t('settings.defaultCreationVault.desc'))
+			.addDropdown(drop => {
+				drop.addOption('vault', i18n.t('settings.defaultCreationVault.localVault'));
+				drop.addOption('mounts', i18n.t('settings.defaultCreationVault.mounts'));
+				drop.setValue(this.plugin.settings.defaultCreationVault ?? 'vault');
+				drop.onChange(val => {
+					void (async () => {
+						this.plugin.settings.defaultCreationVault = val;
+						await this.plugin.saveSettings();
+					})();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName(i18n.t('settings.enableExplorerHighlight.name'))
+			.setDesc(i18n.t('settings.enableExplorerHighlight.desc'))
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableExplorerHighlight)
+				.onChange(val => {
+					void (async () => {
+						this.plugin.settings.enableExplorerHighlight = val;
+						await this.plugin.saveSettings();
+						if (val) {
+							this.plugin.setupExplorerHighlighting();
+						} else {
+							this.plugin.teardownExplorerHighlighting();
+						}
+					})();
 				}));
 
 		// ── Ignore Lists ─────────────────────────────────────────────────
-		new Setting(containerEl).setName('Ignore lists').setHeading();
+		new Setting(containerEl).setName(i18n.t('settings.ignoreLists')).setHeading();
 
 		// ── Global ignore patterns ───────────────────────────────────────
 		new Setting(containerEl)
-			.setName('Global ignore patterns')
-			.setDesc('Patterns applied to every mount. Same syntax as per-mount patterns: plain names match any leaf, globs (*.tmp) match leaf names, paths with / match subtrees. Pre-populated with common OS noise files.')
+			.setName(i18n.t('settings.globalIgnorePatterns.name'))
+			.setDesc(i18n.t('settings.globalIgnorePatterns.desc'))
 			.setHeading();
 
 		const globalIgnoreContainer = containerEl.createDiv('folderbridge-global-ignore');
@@ -3022,14 +4183,14 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			const list = this.plugin.settings.globalIgnorePatterns || [];
 			if (list.length === 0) {
 				globalIgnoreContainer.createEl('p', {
-					text: `No global patterns. Files like ${dsStore} are visible in all mounts.`,
+					text: i18n.t('settings.globalIgnorePatterns.empty'),
 					cls: 'setting-item-description'
 				});
 			}
 			for (const item of list) {
 				const itemEl = globalIgnoreContainer.createDiv('folderbridge-ignore-item');
 				itemEl.createSpan({ text: item });
-				const removeBtn = itemEl.createEl('button', { text: 'Remove' });
+				const removeBtn = itemEl.createEl('button', { text: i18n.t('button.remove') });
 				removeBtn.onclick = () => {
 					void (async () => {
 						this.plugin.settings.globalIgnorePatterns = this.plugin.settings.globalIgnorePatterns.filter(i => i !== item);
@@ -3040,8 +4201,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 				};
 			}
 			const addContainer = globalIgnoreContainer.createDiv('folderbridge-ignore-add');
-			const inputEl = addContainer.createEl('input', { type: 'text', placeholder: 'e.g. .DS_Store, Thumbs.db, *.tmp, node_modules' });
-			const addBtn = addContainer.createEl('button', { text: 'Add' });
+			const inputEl = addContainer.createEl('input', { type: 'text', placeholder: i18n.t('settings.globalIgnorePatterns.placeholder') });
+			const addBtn = addContainer.createEl('button', { text: i18n.t('settings.globalIgnorePatterns.add') });
 			addBtn.onclick = () => {
 				void (async () => {
 					const val = inputEl.value.trim();
@@ -3063,8 +4224,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 		// ── Per-mount ignore lists ────────────────────────────────────────
 		new Setting(containerEl)
-			.setName('Per-mount ignore lists')
-			.setDesc('Patterns applied to a specific mount only.')
+			.setName(i18n.t('settings.perMountIgnoreLists.name'))
+			.setDesc(i18n.t('settings.perMountIgnoreLists.desc'))
 			.setHeading();
 
 		const editableMounts = this.plugin.settings.mountPoints.filter(m => this.plugin.isUserEditableMount(m));
@@ -3072,8 +4233,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		if (editableMounts.length === 0) {
 			containerEl.createEl('p', {
 				text: this.plugin.settings.tocSources.length > 0 || this.plugin.settings.managedTocSource.trim()
-					? 'Ignore lists are editable for mounts you manage in settings or through the managed TOC file. External TOC mounts define ignore rules in their source file.'
-					: 'Add a mount point first to configure its ignore list.',
+					? i18n.t('settings.perMountIgnoreLists.externalHint')
+					: i18n.t('settings.perMountIgnoreLists.emptyHint'),
 				cls: 'setting-item-description',
 			});
 		} else {
@@ -3083,8 +4244,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			}
 
 			new Setting(containerEl)
-				.setName('Select mount')
-				.setDesc('Choose which mount\'s ignore list to edit.')
+				.setName(i18n.t('settings.selectMount.name'))
+				.setDesc(i18n.t('settings.selectMount.desc'))
 				.addDropdown(drop => {
 					for (const m of editableMounts) {
 						drop.addOption(m.id, m.label || m.virtualPath);
@@ -3105,14 +4266,14 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 					const list = selectedMount.ignoreList || [];
 					if (list.length === 0) {
-						ignoreListContainer.createEl('p', { text: 'No items ignored for this mount.', cls: 'setting-item-description' });
+						ignoreListContainer.createEl('p', { text: i18n.t('ignore.list.empty'), cls: 'setting-item-description' });
 					}
 
 					for (const item of list) {
 						const itemEl = ignoreListContainer.createDiv('folderbridge-ignore-item');
 						itemEl.createSpan({ text: item });
 
-						const removeBtn = itemEl.createEl('button', { text: 'Remove' });
+						const removeBtn = itemEl.createEl('button', { text: i18n.t('button.remove') });
 						removeBtn.onclick = () => {
 							void (async () => {
 								selectedMount.ignoreList = selectedMount.ignoreList!.filter(i => i !== item);
@@ -3124,16 +4285,16 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 					const addContainer = ignoreListContainer.createDiv('folderbridge-ignore-add');
 
-					const inputEl = addContainer.createEl('input', { type: 'text', placeholder: 'Name (e.g. .DS_Store) or path (e.g. vendor/cache)' });
+					const inputEl = addContainer.createEl('input', { type: 'text', placeholder: i18n.t('ignore.list.placeholder') });
 
 					// Browse mount button — opens disk picker rooted at the mount's real path
 					// Multi-select: all chosen folders are added to the ignore list immediately.
-					const browseBtn = addContainer.createEl('button', { text: 'Browse…' });
-					browseBtn.setAttribute('title', `Hold ${ctrlCmd} to select multiple folders`);
+					const browseBtn = addContainer.createEl('button', { text: i18n.t('ignore.list.browse') });
+					browseBtn.setAttribute('title', i18n.t('ignore.list.multiSelectHint', { ctrlCmd }));
 					browseBtn.onclick = () => {
 						void (async () => {
 							const selections = await browseMultipleFoldersOnDisk(
-								`Select folder(s) to ignore in "${selectedMount.label || selectedMount.virtualPath}"`,
+								i18n.t('ignore.list.browseTitle', { mount: selectedMount.label || selectedMount.virtualPath }),
 								selectedMount.realPath,
 							);
 							if (!selections?.length) return;
@@ -3157,12 +4318,12 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 								await this.plugin.persistEditableMountFromState(selectedMount);
 								await this.plugin.applyIgnoreListToVault(selectedMount);
 								renderIgnoreList();
-								new Notice(`Folder Bridge: Added ${added} item${added === 1 ? '' : 's'} to the ignore list.`);
+								new Notice(i18n.t('ignore.list.added', { count: added, plural: added === 1 ? '' : 's' }));
 							}
 						})();
 					};
 
-					const addBtn = addContainer.createEl('button', { text: 'Add' });
+					const addBtn = addContainer.createEl('button', { text: i18n.t('ignore.list.add') });
 					addBtn.onclick = () => {
 						void (async () => {
 							const val = inputEl.value.trim();
@@ -3193,8 +4354,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 		// ── Managed TOC file ───────────────────────────────────────────────
 		new Setting(containerEl)
-			.setName(`Managed ${toc} file`)
-			.setDesc(`Optional writable JSON file for local and vault mounts created from the ${pluginName} UI. When set, new local and vault mounts are written there instead of data.json.`)
+			.setName(i18n.t('toc.manage.name'))
+			.setDesc(i18n.t('toc.manage.desc'))
 			.setHeading();
 
 		const managedTocContainer = containerEl.createDiv('folderbridge-toc-sources');
@@ -3205,20 +4366,20 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			const suggestedPath = this.plugin.getSuggestedManagedTocPath();
 			managedTocContainer.createEl('p', {
 				text: currentPath
-					? `Current managed TOC file: ${currentPath}`
-					: 'No managed TOC file configured. UI-created local and vault mounts will stay in data.json until you set one.',
+					? i18n.t('toc.manage.current', { path: currentPath })
+					: i18n.t('toc.manage.none'),
 				cls: 'setting-item-description',
 			});
 			const resolvedToc = this.plugin.resolvedManagedTocSource;
 			if (currentFallbackPath && resolvedToc === currentFallbackPath && resolvedToc !== currentPath) {
 				managedTocContainer.createEl('p', {
-					text: `Using fallback TOC file on this device: ${resolvedToc}`,
+					text: i18n.t('toc.manage.fallbackActive', { path: resolvedToc }),
 					cls: 'setting-item-description',
 				});
 			}
 			if (!currentPath && suggestedPath) {
 				managedTocContainer.createEl('p', {
-					text: `Suggested location: ${suggestedPath}`,
+					text: i18n.t('toc.manage.suggested', { path: suggestedPath }),
 					cls: 'setting-item-description',
 				});
 			}
@@ -3226,15 +4387,15 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			const addRow = managedTocContainer.createDiv('folderbridge-ignore-add');
 			const inputEl = addRow.createEl('input', {
 				type: 'text',
-				placeholder: 'Absolute path to a writable TOC JSON file, e.g. /home/me/folderbridge.managed.json',
+				placeholder: i18n.t('toc.manage.placeholder'),
 			});
 			inputEl.value = currentPath || suggestedPath || '';
 
 			const fallbackRow = managedTocContainer.createDiv('folderbridge-ignore-add');
-			fallbackRow.createEl('span', { text: 'Fallback TOC path:', cls: 'setting-item-description' });
+			fallbackRow.createEl('span', { text: i18n.t('toc.manage.fallbackLabel'), cls: 'setting-item-description' });
 			const fallbackInputEl = fallbackRow.createEl('input', {
 				type: 'text',
-				placeholder: 'Fallback path for another device, e.g. C:\\Users\\me\\folderbridge.managed.json',
+				placeholder: i18n.t('toc.manage.fallbackPlaceholder'),
 			});
 			fallbackInputEl.value = currentFallbackPath;
 			const saveFallback = () => {
@@ -3246,19 +4407,19 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 				})();
 			};
 			fallbackInputEl.addEventListener('change', saveFallback);
-			const fallbackBrowseBtn = fallbackRow.createEl('button', { text: 'Browse...' });
+			const fallbackBrowseBtn = fallbackRow.createEl('button', { text: i18n.t('button.browse') });
 			fallbackBrowseBtn.onclick = () => {
 				void (async () => {
-					const selected = await browseFolderOnDisk('Select fallback TOC folder');
+					const selected = await browseFolderOnDisk(i18n.t('toc.manage.fallbackBrowseTitle'));
 					if (!selected || !path) return;
 					const filename = currentPath ? path.win32.basename(currentPath) : 'folderbridge.managed.json';
 					fallbackInputEl.value = path.join(selected, filename);
 				})();
 			};
-			const fallbackSaveBtn = fallbackRow.createEl('button', { text: 'Set fallback' });
+			const fallbackSaveBtn = fallbackRow.createEl('button', { text: i18n.t('toc.manage.setFallback') });
 			fallbackSaveBtn.onclick = saveFallback;
 
-			const saveBtn = addRow.createEl('button', { text: currentPath ? 'Rebind' : 'Set' });
+			const saveBtn = addRow.createEl('button', { text: currentPath ? i18n.t('toc.manage.rebind') : i18n.t('toc.manage.set') });
 			saveBtn.onclick = () => {
 				void (async () => {
 					if (await this.plugin.bindManagedTocSource(inputEl.value)) {
@@ -3268,15 +4429,20 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			};
 
 			if (!currentPath) {
-				const createBtn = addRow.createEl('button', { text: 'Create from current UI mounts' });
+				const createBtn = addRow.createEl('button', { text: i18n.t('toc.manage.createFromUi') });
 				createBtn.onclick = () => {
 					void (async () => {
 						const result = await this.plugin.createManagedTocFromCurrentMounts(inputEl.value);
 						if (!result.success || !result.targetPath) return;
 						if (result.moved > 0 || result.skipped > 0) {
-							new Notice(`Folder Bridge: Created ${result.targetPath} and moved ${result.moved} local/vault mount(s) into it.${result.skipped ? ` ${result.skipped} cloud mount(s) stayed in data.json.` : ''}`);
+							new Notice(i18n.t('toc.manage.createdMoved', {
+								path: result.targetPath,
+								moved: result.moved,
+								plural: result.moved === 1 ? '' : 's',
+								skipped: result.skipped > 0 ? i18n.t('toc.manage.skippedCloud', { skipped: result.skipped }) : '',
+							}));
 						} else {
-							new Notice(`Folder Bridge: Created ${result.targetPath}. New local and vault mounts will be written there.`);
+							new Notice(i18n.t('toc.manage.created', { path: result.targetPath }));
 						}
 						this.renderSync();
 					})();
@@ -3284,7 +4450,7 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			}
 
 			if (currentPath) {
-				const clearBtn = addRow.createEl('button', { text: 'Disable' });
+				const clearBtn = addRow.createEl('button', { text: i18n.t('button.disable') });
 				clearBtn.onclick = () => {
 					void (async () => {
 						await this.plugin.unbindManagedTocSource();
@@ -3292,14 +4458,18 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 					})();
 				};
 
-				const migrateBtn = addRow.createEl('button', { text: 'Move local/vault UI mounts here' });
+				const migrateBtn = addRow.createEl('button', { text: i18n.t('toc.manage.migrate') });
 				migrateBtn.onclick = () => {
 					void (async () => {
 						const result = await this.plugin.migrateLocalManualMountsToManagedToc();
 						if (result.moved > 0 || result.skipped > 0) {
-							new Notice(`Folder Bridge: Moved ${result.moved} local/vault mount(s) to the managed TOC file.${result.skipped ? ` ${result.skipped} cloud mount(s) stayed in data.json.` : ''}`);
+							new Notice(i18n.t('toc.manage.migrated', {
+								moved: result.moved,
+								plural: result.moved === 1 ? '' : 's',
+								skipped: result.skipped > 0 ? i18n.t('toc.manage.skippedCloud', { skipped: result.skipped }) : '',
+							}));
 						} else {
-							new Notice(`${this.plugin.manifest.name}: no local or vault UI mounts needed migration.`);
+							new Notice(i18n.t('toc.manage.nothingToMigrate'));
 						}
 						this.renderSync();
 					})();
@@ -3310,12 +4480,12 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 		// ── External TOC config files ─────────────────────────────────────
 		new Setting(containerEl)
-			.setName(`External ${toc} config files`)
-			.setDesc('Load one or more JSON config files that declare additional mounts and per-mount ignore rules.')
+			.setName(i18n.t('toc.external.name'))
+			.setDesc(i18n.t('toc.external.desc'))
 			.setHeading();
 
 		const tocInfo = containerEl.createEl('p', {
-			text: `External ${toc} files are desktop-only and remain authoritative. Mounts loaded from these files appear below but must be edited in their source file.`,
+			text: i18n.t('toc.external.note'),
 			cls: 'setting-item-description',
 		});
 		tocInfo.addClass('folderbridge-setting-note');
@@ -3333,7 +4503,7 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			tocContainer.empty();
 			if (this.plugin.settings.tocSources.length === 0) {
 				tocContainer.createEl('p', {
-					text: `No external ${toc} config files configured.`,
+					text: i18n.t('toc.external.none'),
 					cls: 'setting-item-description',
 				});
 			}
@@ -3341,7 +4511,7 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			for (const source of this.plugin.settings.tocSources) {
 				const row = tocContainer.createDiv('folderbridge-ignore-item');
 				row.createSpan({ text: source });
-				const removeBtn = row.createEl('button', { text: 'Remove' });
+				const removeBtn = row.createEl('button', { text: i18n.t('button.remove') });
 				removeBtn.onclick = () => {
 					void (async () => {
 						this.plugin.settings.tocSources = this.plugin.settings.tocSources.filter(item => item !== source);
@@ -3355,9 +4525,9 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			const addRow = tocContainer.createDiv('folderbridge-ignore-add');
 			const inputEl = addRow.createEl('input', {
 				type: 'text',
-				placeholder: 'Absolute path to a read-only TOC JSON file, e.g. /home/me/folderbridge.mounts.json',
+				placeholder: i18n.t('toc.external.placeholder'),
 			});
-			const addBtn = addRow.createEl('button', { text: 'Add' });
+			const addBtn = addRow.createEl('button', { text: i18n.t('toc.external.add') });
 			addBtn.onclick = () => {
 				void (async () => {
 					const value = inputEl.value.trim();
@@ -3376,13 +4546,34 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		renderTocSources();
 
 		// ── Mount points ─────────────────────────────────────────────────
-		new Setting(containerEl).setName('Mount points').setHeading();
+		new Setting(containerEl).setName(i18n.t('settings.mountPoints')).setHeading();
+
+		// ── Mount list sort order ────────────────────────────────────────
+		if (this.plugin.settings.enableMountMerging) {
+			new Setting(containerEl)
+				.setName(i18n.t('settings.mountListSort.name'))
+				.setDesc(i18n.t('settings.mountListSort.desc'))
+				.addDropdown(drop => drop
+					.addOption('default', i18n.t('settings.mountListSort.options.default'))
+					.addOption('name-asc', i18n.t('settings.mountListSort.options.nameAsc'))
+					.addOption('name-desc', i18n.t('settings.mountListSort.options.nameDesc'))
+					.addOption('priority-desc', i18n.t('settings.mountListSort.options.priorityDesc'))
+					.addOption('priority-asc', i18n.t('settings.mountListSort.options.priorityAsc'))
+					.setValue(this.plugin.settings.mountListSort ?? 'default')
+					.onChange(val => {
+						void (async () => {
+							this.plugin.settings.mountListSort = val as typeof this.plugin.settings.mountListSort;
+							await this.plugin.saveSettings();
+							this.renderSync();
+						})();
+					}));
+		}
 
 		new Setting(containerEl)
-			.setName('Add a new mount')
-			.setDesc('Map an external folder to a virtual path inside your vault.')
+			.setName(i18n.t('settings.addMount.name'))
+			.setDesc(i18n.t('settings.addMount.desc'))
 			.addButton(btn => btn
-				.setButtonText('Add mount point')
+				.setButtonText(i18n.t('settings.addMount.button'))
 				.setCta()
 				.onClick(() => {
 					new MountManagerModal(
@@ -3396,8 +4587,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 					).open();
 				}))
 			.addButton(btn => btn
-				.setButtonText('Export…')
-				.setTooltip('Export all mounts to a JSON file for backup or transfer')
+				.setButtonText(i18n.t('button.export'))
+				.setTooltip(i18n.t('button.export.tooltip'))
 				.onClick(() => {
 					const manualMounts = this.plugin.settings.mountPoints.filter(m => this.plugin.isUserEditableMount(m));
 					// Strip secrets before exporting
@@ -3429,8 +4620,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 					URL.revokeObjectURL(url);
 				}))
 			.addButton(btn => btn
-				.setButtonText('Import…')
-				.setTooltip('Import mounts from a previously exported JSON file')
+				.setButtonText(i18n.t('button.import'))
+				.setTooltip(i18n.t('button.import.tooltip'))
 				.onClick(() => {
 					const input = document.createElement('input');
 					input.type = 'file';
@@ -3446,10 +4637,10 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 									? parsed
 									: (parsed as Record<string, unknown>).mountPoints;
 								const mounts = Array.isArray(parsedMounts) ? parsedMounts as MountPoint[] : [];
-								if (!Array.isArray(mounts) || mounts.length === 0) {
-									new Notice(`${this.plugin.manifest.name}: no mount points found in the selected file.`);
-									return;
-								}
+							if (!Array.isArray(mounts) || mounts.length === 0) {
+								new Notice(i18n.t('import.noMounts'));
+								return;
+							}
 
 								let added = 0, skipped = 0;
 								for (const m of mounts) {
@@ -3475,10 +4666,14 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 									await this.plugin.addMount(fresh);
 									added++;
 								}
-								new Notice(`Folder Bridge: Imported ${added} mount(s).${skipped ? ` ${skipped} skipped (invalid).` : ''}`);
+								new Notice(i18n.t('import.summary', {
+									added,
+									plural: added === 1 ? '' : 's',
+									skipped: skipped > 0 ? i18n.t('import.skippedInvalid', { skipped }) : '',
+								}));
 								this.renderSync();
 							} catch {
-								new Notice(`${this.plugin.manifest.name}: failed to parse the selected file. Is it a valid Folder Bridge export?`);
+								new Notice(i18n.t('import.failed'));
 							}
 						})();
 					};
@@ -3488,14 +4683,46 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		// Render each existing mount (status loaded async below)
 		if (this.plugin.settings.mountPoints.length === 0) {
 			containerEl.createEl('p', {
-				text: 'No mounts configured yet. Click "add mount point" to get started.',
+				text: i18n.t('settings.noMounts'),
 				cls: 'setting-item-description',
+			});
+		} else {
+			// Warn about duplicate priorities
+			const priorityGroups = new Map<number, MountPoint[]>();
+			for (const m of this.plugin.settings.mountPoints) {
+				const p = m.priority ?? 0;
+				if (!priorityGroups.has(p)) priorityGroups.set(p, []);
+				priorityGroups.get(p)!.push(m);
+			}
+			const dupes = [...priorityGroups.entries()].filter(([, arr]) => arr.length > 1);
+			if (dupes.length > 0) {
+				containerEl.createEl('p', {
+					text: i18n.t('settings.priorityWarning', { count: dupes.length }),
+					cls: 'setting-item-description folderbridge-priority-warning',
+				});
+			}
+		}
+
+		// Sort mounts before rendering
+		const sortMode = this.plugin.settings.mountListSort ?? 'default';
+		let sortedMounts = [...this.plugin.settings.mountPoints];
+		if (sortMode !== 'default') {
+			sortedMounts = sortedMounts.sort((a, b) => {
+				const nameA = (a.label || a.virtualPath).toLowerCase();
+				const nameB = (b.label || b.virtualPath).toLowerCase();
+				const prioA = a.priority ?? 0;
+				const prioB = b.priority ?? 0;
+				if (sortMode === 'name-asc') return nameA.localeCompare(nameB);
+				if (sortMode === 'name-desc') return nameB.localeCompare(nameA);
+				if (sortMode === 'priority-desc') return prioB - prioA;
+				if (sortMode === 'priority-asc') return prioA - prioB;
+				return 0;
 			});
 		}
 
 		// Wrap mount rows in a container so drag-drop only affects this list
 		const mountListEl = containerEl.createDiv('folderbridge-mount-list');
-		for (const mount of this.plugin.settings.mountPoints) {
+		for (const mount of sortedMounts) {
 			this.renderMountRow(mountListEl, mount);
 		}
 	}
@@ -3509,24 +4736,31 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		const isUserEditable = this.plugin.isUserEditableMount(mount);
 		const displayName = mount.label || mount.virtualPath;
 
-		let desc = `${normalizePath(mount.virtualPath)} → ${mount.realPath}`;
+		const mountPriority = mount.priority ?? 0;
+		let desc = `${normalizePath(mount.virtualPath)} → ${mount.realPath}  [${i18n.t('mountRow.priority')}: ${mountPriority}]`;
 		if (mount.fallbackRealPath) {
-			desc += `\n(Fallback path: ${mount.fallbackRealPath})`;
+			desc += ` (${i18n.t('mountRow.fallbackPath')}: ${mount.fallbackRealPath})`;
 		}
 		if (isTocManaged) {
 			desc += isManagedToc
-				? `\n(Managed TOC file: ${mount.tocSourcePath})`
-				: `\n(External config file: ${mount.tocSourcePath})`;
+				? ` (${i18n.t('mountRow.managedToc')}: ${mount.tocSourcePath})`
+				: ` (${i18n.t('mountRow.externalConfig')}: ${mount.tocSourcePath})`;
 		}
 		if (!isThisDevice) {
-			desc += ` (Created on device: ${mount.deviceId?.substring(0, 8) || 'unknown'})`;
+			desc += ` (${i18n.t('mountRow.createdOnDevice')}: ${mount.deviceId?.substring(0, 8) || 'unknown'})`;
 		}
 
 		const effectivePath = this.plugin.pathMapper.getEffectiveRealPath(mount);
 		if (effectivePath !== mount.realPath) {
 			desc += mount.deviceOverrides?.[this.plugin.settings.deviceId] === effectivePath
-				? `\n(Path override for this device: ${effectivePath})`
-				: `\n(Using fallback path: ${effectivePath})`;
+				? ` (${i18n.t('mountRow.pathOverride')}: ${effectivePath})`
+				: ` (${i18n.t('mountRow.usingFallback')}: ${effectivePath})`;
+		}
+
+		// Tags as plain text
+		if (mount.tags && mount.tags.length > 0) {
+			const tagsStr = mount.tags.map(t => `#${t}`).join(', ');
+			desc += ` [${i18n.t('mountRow.tags')}: ${tagsStr}]`;
 		}
 
 		const setting = new Setting(containerEl)
@@ -3537,20 +4771,20 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 					.setValue(mount.enabled)
 					.setTooltip(
 						!isUserEditable
-							? 'This mount is managed by an external config file. Edit the source file to change its enabled state.'
-							: (canEnable ? 'Enable / disable this mount' : 'This mount belongs to another device and cannot be enabled here.')
+							? i18n.t('mountRow.tooltip.externalManaged')
+							: (canEnable ? i18n.t('mountRow.tooltip.toggle') : i18n.t('mountRow.tooltip.foreignDevice'))
 					)
 					.onChange(val => {
 						void (async () => {
 							if (!isUserEditable) {
 								toggle.setValue(mount.enabled);
-								new Notice(`${this.plugin.manifest.name}: this mount is managed by an external config file. Edit the source file to change it.`);
+								new Notice(i18n.t('mountRow.notice.externalManaged'));
 								return;
 							}
 							if (!canEnable) {
 								// Revert the toggle visually if they try to enable a foreign mount
 								toggle.setValue(false);
-								new Notice(`${this.plugin.manifest.name}: cannot enable a mount created on a different device.`);
+								new Notice(i18n.t('mountRow.notice.foreignDevice'));
 								return;
 							}
 
@@ -3585,13 +4819,13 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 					.setIcon(mount.readOnly ? 'lock' : 'unlock')
 					.setTooltip(
 						!isUserEditable
-							? 'This mount is managed by an external config file. Edit the source file to change its read-only state.'
-							: (mount.readOnly ? 'Read-only — click to allow writes' : 'Writable — click to make read-only')
+							? i18n.t('mountRow.tooltip.externalReadOnly')
+							: (mount.readOnly ? i18n.t('mountRow.tooltip.readOnly') : i18n.t('mountRow.tooltip.writable'))
 					)
 					.onClick(() => {
 						void (async () => {
 							if (!isUserEditable) {
-								new Notice(`${this.plugin.manifest.name}: this mount is managed by an external config file. Edit the source file to change it.`);
+								new Notice(i18n.t('mountRow.notice.externalManaged'));
 								return;
 							}
 							await this.plugin.setMountReadOnly(mount.id, !mount.readOnly);
@@ -3605,15 +4839,15 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 		const addOverridePathButton = (): void => {
 			setting.addButton(btn => btn
-				.setButtonText('Use path on this device')
-				.setTooltip('Use the real folder path for this mount on this device.')
+				.setButtonText(i18n.t('mountRow.usePathOnDevice'))
+				.setTooltip(i18n.t('mountRow.usePathOnDevice.tooltip'))
 				.onClick(() => {
 					void (async () => {
-						const newPath = await browseFolderOnDisk('Select real folder for this device');
+						const newPath = await browseFolderOnDisk(i18n.t('mountRow.selectRealFolder'));
 						if (newPath) {
 							await this.plugin.setDeviceOverride(mount.id, newPath);
 							this.renderSync();
-							new Notice(`${this.plugin.manifest.name}: path overridden for this device.`);
+							new Notice(i18n.t('mountRow.notice.pathOverridden'));
 						}
 					})();
 				}));
@@ -3626,8 +4860,8 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		// Edit button — opens the modal pre-populated with this mount's values
 		if (isThisDevice && isUserEditable) {
 			setting.addButton(btn => btn
-				.setButtonText('Edit')
-				.setTooltip("Edit this mount's paths, label, or read-only flag")
+				.setButtonText(i18n.t('button.edit'))
+				.setTooltip(i18n.t('mountRow.edit.tooltip'))
 				.onClick(() => {
 					new MountManagerModal(
 						this.app,
@@ -3646,7 +4880,7 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 
 		if (isUserEditable) {
 			setting.addButton(btn => {
-				btn.setButtonText('Remove')
+				btn.setButtonText(i18n.t('button.remove'))
 					.onClick(() => {
 						void (async () => {
 							await this.plugin.removeMount(mount.id);
@@ -3722,7 +4956,7 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 		// ── Reconnect button (shown immediately when mount is known unreachable) ────
 		if (canEnable && this.plugin.mountHealthMap.get(mount.id) === false) {
 			setting.addButton(btn => btn
-				.setButtonText('Reconnect')
+				.setButtonText(i18n.t('button.reconnect'))
 				.onClick(() => {
 					void (async () => {
 						await this.plugin.reconnectMount(mount);

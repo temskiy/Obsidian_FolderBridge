@@ -1,5 +1,6 @@
 import { App, Modal, Setting } from 'obsidian';
 import { logger } from '../logger';
+import { i18n } from '../i18n';
 
 export class MountRootDeleteModal extends Modal {
     private resolve: (value: 'unmount' | 'delete' | 'unmount-always' | 'delete-always' | 'cancel') => void | Promise<void>;
@@ -20,19 +21,19 @@ export class MountRootDeleteModal extends Modal {
     onOpen() {
         const { contentEl } = this;
         contentEl.empty();
-        contentEl.createEl('h2', { text: 'Remove mounted folder' });
+        contentEl.createEl('h2', { text: i18n.t('mountDelete.title') });
 
         contentEl.createEl('p', {
-            text: `You are about to remove the mounted folder root "${this.mountPath}".`
+            text: i18n.t('mountDelete.desc1', { path: this.mountPath })
         });
 
         contentEl.createEl('p', {
-            text: 'Do you want to permanently delete the real folder on disk, or just unmount it from Obsidian?'
+            text: i18n.t('mountDelete.desc2')
         });
 
         new Setting(contentEl)
-            .setName("Don't ask again")
-            .setDesc('Save this choice in settings')
+            .setName(i18n.t('mountDelete.dontAsk'))
+            .setDesc(i18n.t('mountDelete.dontAsk.desc'))
             .addToggle(toggle => toggle
                 .setValue(this.dontAskAgain)
                 .onChange(value => {
@@ -41,7 +42,7 @@ export class MountRootDeleteModal extends Modal {
             );
         const buttonContainer = contentEl.createDiv({ cls: 'folderbridge-modal-buttons' });
 
-        const btnCancel = buttonContainer.createEl('button', { text: 'Cancel' });
+        const btnCancel = buttonContainer.createEl('button', { text: i18n.t('button.cancel') });
         btnCancel.onclick = () => {
             if (!this.resolved) {
                 this.resolved = true;
@@ -50,7 +51,7 @@ export class MountRootDeleteModal extends Modal {
             }
         };
 
-        const btnUnmount = buttonContainer.createEl('button', { text: 'Unmount only' });
+        const btnUnmount = buttonContainer.createEl('button', { text: i18n.t('mountDelete.unmount') });
         btnUnmount.onclick = () => {
             if (!this.resolved) {
                 this.resolved = true;
@@ -59,7 +60,7 @@ export class MountRootDeleteModal extends Modal {
             }
         };
 
-        const btnDelete = buttonContainer.createEl('button', { text: 'Delete real folder', cls: 'mod-warning' });
+        const btnDelete = buttonContainer.createEl('button', { text: i18n.t('mountDelete.delete'), cls: 'mod-warning' });
         btnDelete.onclick = () => {
             if (!this.resolved) {
                 this.resolved = true;

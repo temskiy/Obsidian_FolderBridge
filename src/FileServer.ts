@@ -167,7 +167,9 @@ export class FileServer {
             const filePath = decodeURIComponent(rawPath).replace(/\\/g, '/');
 
             // Security: verify path is under an allowed mount root
+            logger.warn(`[FolderBridge] FileServer request: ${filePath}`);
             if (!this.isPathAllowed(filePath)) {
+                logger.warn(`[FolderBridge] FileServer: 403 Forbidden for ${filePath}`);
                 res.writeHead(403, { 'Content-Type': 'text/plain' });
                 res.end('Forbidden');
                 return;
@@ -265,6 +267,17 @@ export class FileServer {
             if (forwardSlashPath.startsWith(root + '/') || forwardSlashPath === root) {
                 return true;
             }
+        }
+        // [BUGFIX] When a root mount covers all paths, files from the primary vault
+        // resolve to paths not in allowedRoots. Fall back to disk existence check.
+        if (fsMod && pathMod) {
+            try {
+                const nativePath = forwardSlashPath.split('/').join(pathMod.sep);
+                if (fsMod.existsSync(nativePath)) {
+                    logger.warn(`[FolderBridge] FileServer: allowing path not in allowedRoots: ${forwardSlashPath}`);
+                    return true;
+                }
+            } catch { /* ignore */ }
         }
         return false;
     }

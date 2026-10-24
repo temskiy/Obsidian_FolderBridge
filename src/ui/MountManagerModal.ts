@@ -6,6 +6,7 @@ import { logger } from '../logger';
 import { getRuntimeRequire, loadOptionalNodeModule } from '../runtimeNode';
 import { SubmitStateController } from './SubmitStateController';
 import { shouldUseFolderNameAsLabel } from './mountLabel';
+import { i18n } from '../i18n';
 
 // Lazy-loaded — unavailable on Obsidian Mobile (Capacitor).
 const path: typeof import('path') = loadOptionalNodeModule<typeof import('path')>('path') ?? null as never;
@@ -38,7 +39,7 @@ interface ElectronOpenDialogOptions {
  * Returns the selected absolute path, or null if the user cancelled or the
  * Electron remote API is unavailable in the current host environment.
  */
-export async function browseFolderOnDisk(title = 'Select folder', defaultPath?: string): Promise<string | null> {
+export async function browseFolderOnDisk(title = i18n.t('mountManager.selectFolder'), defaultPath?: string): Promise<string | null> {
 	try {
 		const runtimeRequire = getRuntimeRequire();
 		const electron = runtimeRequire?.('electron') as ElectronModule | undefined;
@@ -46,7 +47,7 @@ export async function browseFolderOnDisk(title = 'Select folder', defaultPath?: 
 		// it on the electron object so both old and new versions work here.
 		const dialog: ElectronDialog | undefined = electron?.remote?.dialog ?? electron?.dialog;
 		if (!dialog?.showOpenDialog) {
-			new Notice('Native folder browser is unavailable. Please type the path manually.');
+			new Notice(i18n.t('mountManager.browserUnavailable'));
 			return null;
 		}
 		const options: ElectronOpenDialogOptions = {
@@ -61,7 +62,7 @@ export async function browseFolderOnDisk(title = 'Select folder', defaultPath?: 
 		return result.filePaths[0];
 	} catch (err) {
 		logger.error('Folder Bridge: Electron dialog error', err);
-		new Notice('Native folder browser is unavailable. Please type the path manually.');
+		new Notice(i18n.t('mountManager.browserUnavailable'));
 		return null;
 	}
 }
@@ -71,13 +72,13 @@ export async function browseFolderOnDisk(title = 'Select folder', defaultPath?: 
  * Returns the array of selected absolute paths, or null if the user cancelled
  * or the Electron remote API is unavailable.
  */
-export async function browseMultipleFoldersOnDisk(title = 'Select folders', defaultPath?: string): Promise<string[] | null> {
+export async function browseMultipleFoldersOnDisk(title = i18n.t('mountManager.selectFolders'), defaultPath?: string): Promise<string[] | null> {
 	try {
 		const runtimeRequire = getRuntimeRequire();
 		const electron = runtimeRequire?.('electron') as ElectronModule | undefined;
 		const dialog: ElectronDialog | undefined = electron?.remote?.dialog ?? electron?.dialog;
 		if (!dialog?.showOpenDialog) {
-			new Notice('Native folder browser is unavailable. Please type the path manually.');
+			new Notice(i18n.t('mountManager.browserUnavailable'));
 			return null;
 		}
 		const options: ElectronOpenDialogOptions = {
@@ -92,7 +93,7 @@ export async function browseMultipleFoldersOnDisk(title = 'Select folders', defa
 		return result.filePaths;
 	} catch (err) {
 		logger.error('Folder Bridge: Electron dialog error', err);
-		new Notice('Native folder browser is unavailable. Please type the path manually.');
+		new Notice(i18n.t('mountManager.browserUnavailable'));
 		return null;
 	}
 }
@@ -113,7 +114,7 @@ export class VaultFolderPickerModal extends SuggestModal<string> {
 	constructor(app: App, onChoose: (folderPath: string) => void | Promise<void>) {
 		super(app);
 		this.onChoose = onChoose;
-		this.setPlaceholder('Type to search vault folders… (leave blank for vault root)');
+		this.setPlaceholder(i18n.t('mountManager.vaultPlaceholder'));
 		// Build the folder list once so getSuggestions only filters, never enumerates
 		this.folders = app.vault.getAllLoadedFiles()
 			.filter((f): f is TFolder => f instanceof TFolder && f.path.length > 0)
@@ -123,10 +124,11 @@ export class VaultFolderPickerModal extends SuggestModal<string> {
 	getSuggestions(query: string): string[] {
 		const q = query.toLowerCase();
 		const results: string[] = [];
+		const rootLabel = i18n.t('vaultBrowser.root');
 
 		// Always offer the root as first option
-		if (!q || '(vault root)'.includes(q)) {
-			results.push('(vault root)');
+		if (!q || rootLabel.toLowerCase().includes(q)) {
+			results.push(rootLabel);
 		}
 
 		for (const p of this.folders) {
@@ -140,7 +142,7 @@ export class VaultFolderPickerModal extends SuggestModal<string> {
 	renderSuggestion(item: string, el: HTMLElement): void {
 		const container = el.createEl('div', { cls: 'vault-folder-suggestion' });
 
-		if (item === '(vault root)') {
+		if (item === i18n.t('vaultBrowser.root')) {
 			container.addClass('vault-folder-suggestion-root');
 			container.createSpan({ text: item, cls: 'vault-folder-suggestion-label' });
 		} else {
@@ -149,7 +151,7 @@ export class VaultFolderPickerModal extends SuggestModal<string> {
 	}
 
 	onChooseSuggestion(item: string): void {
-		void Promise.resolve(this.onChoose(item === '(vault root)' ? '' : item)).catch(error => {
+		void Promise.resolve(this.onChoose(item === i18n.t('vaultBrowser.root') ? '' : item)).catch(error => {
 			logger.error('Folder Bridge: Vault folder picker callback failed', error);
 		});
 	}
@@ -191,6 +193,8 @@ export class MountManagerModal extends Modal {
 	private fallbackRealPath = '';
 	private readOnly = false;
 	private label = '';
+	private priority = 1000;
+	private addCommand = false;
 	private useFolderNameAsLabel = false;
 	// WebDAV fields (password never persisted to data.json)
 	private webdavUrl = '';
@@ -219,6 +223,13 @@ export class MountManagerModal extends Modal {
 	private watcherCreateFilter: 'all' | 'markdown-only' = 'all';
 	private watcherSuppressAllEvents = false;
 	private maxFiles: number | undefined = undefined;
+	// Tags for grouping mounts
+	private tags: string[] = [];
+	// Large file transfer confirmation
+	private enableLargeFileConfirm = false;
+	private largeFileThresholdKB: number | undefined = undefined;
+	// Explorer highlight color
+	private highlightColor = '';
 
 	// ── Component references for programmatic updates ────────────────────────
 	private virtualPathText: TextComponent | null = null;
@@ -242,8 +253,8 @@ export class MountManagerModal extends Modal {
 		this.onSave = onSave;
 		this.editMount = editMount;
 		this.submitState = new SubmitStateController(
-			editMount ? 'Save changes' : 'Validate and add',
-			editMount ? 'Saving...' : 'Adding...',
+			editMount ? i18n.t('mountManager.submit.save') : i18n.t('mountManager.submit.add'),
+			editMount ? i18n.t('mountManager.submit.saving') : i18n.t('mountManager.submit.adding'),
 		);
 		// Pre-populate state from existing mount
 		if (editMount) {
@@ -253,6 +264,8 @@ export class MountManagerModal extends Modal {
 			this.fallbackRealPath = editMount.fallbackRealPath ?? '';
 			this.readOnly = editMount.readOnly;
 			this.label = editMount.label ?? '';
+			this.priority = editMount.priority ?? 1000;
+			this.addCommand = editMount.addCommand ?? false;
 			this.useFolderNameAsLabel = shouldUseFolderNameAsLabel(this.realPath, this.label);
 			// WebDAV
 			this.webdavUrl = editMount.webdavUrl ?? '';
@@ -279,6 +292,13 @@ export class MountManagerModal extends Modal {
 			this.watcherCreateFilter = editMount.watcherCreateFilter ?? 'all';
 			this.watcherSuppressAllEvents = editMount.watcherSuppressAllEvents ?? false;
 			this.maxFiles = editMount.maxFiles;
+			// Tags — only pre-populate when editing (not on new mount creation)
+			this.tags = editMount.tags ? [...editMount.tags] : [];
+			// Large file confirmation
+			this.enableLargeFileConfirm = editMount.enableLargeFileConfirm ?? false;
+			this.largeFileThresholdKB = editMount.largeFileThresholdKB;
+			// Explorer highlight color
+			this.highlightColor = editMount.highlightColor ?? '';
 		} else if (initialValues) {
 			this.mountType = initialValues.mountType ?? this.mountType;
 			this.virtualPath = initialValues.virtualPath ?? this.virtualPath;
@@ -298,13 +318,11 @@ export class MountManagerModal extends Modal {
 		const synologyLabel = 'Synology NAS (DSM WebDAV)';
 		const qnapLabel = 'QNAP NAS';
 		const webdav = 'WebDAV';
+		const s3 = 'S3';
 		const obsidianDesktop = 'Obsidian Desktop';
 		const wslLabel = 'WSL';
-		const iam = 'IAM';
-		const aws = 'AWS';
-		const b2 = 'B2';
 		const nas = 'NAS';
-		contentEl.createEl('h2', { text: this.editMount ? 'Edit mount point' : 'Add mount point' });
+		contentEl.createEl('h2', { text: this.editMount ? i18n.t('mountManager.editTitle') : i18n.t('mountManager.title') });
 
 		const isMobile = Platform.isMobile;
 		const platform = getPlatform();
@@ -334,15 +352,15 @@ export class MountManagerModal extends Modal {
 		if (isMobile) {
 			// On mobile, only WebDAV and S3 mounts are supported
 			contentEl.createEl('p', {
-				text: `On mobile, only ${webdav} and S3 mounts are supported. Local filesystem, vault, and SFTP mounts require ${obsidianDesktop}.`,
+				text: i18n.t('mountManager.mobileOnly', { webdav, s3, desktop: obsidianDesktop }),
 				cls: 'setting-item-description',
 			});
 			contentEl.createEl('p', {
-				text: 'To access local files on this device, install a WebDAV server app (e.g. CX File Explorer) and connect to http://localhost:PORT/',
+				text: i18n.t('mountManager.webdavNote'),
 				cls: 'setting-item-description',
 			});
 			new Setting(contentEl)
-				.setName('Mount type')
+				.setName(i18n.t('mountManager.mountTypeName'))
 				.addDropdown(drop => drop
 					.addOption('webdav', `${webdav} (Nextcloud, ${ownCloud}, generic)`)
 					.addOption('s3', `Amazon S3 / ${backblazeB2}`)
@@ -351,14 +369,14 @@ export class MountManagerModal extends Modal {
 			toggleSections(this.mountType === 's3' ? 's3' : 'webdav');
 		} else {
 			new Setting(contentEl)
-				.setName('Mount type')
-				.setDesc('Choose the storage backend for this mount point')
+				.setName(i18n.t('mountManager.mountTypeName'))
+				.setDesc(i18n.t('mountType.desc'))
 				.addDropdown(drop => drop
-					.addOption('local', 'Local filesystem')
-					.addOption('vault', 'Another Obsidian vault')
+					.addOption('local', i18n.t('mountType.local'))
+					.addOption('vault', i18n.t('mountType.vault'))
 					.addOption('webdav', `${webdav} (Nextcloud, generic)`)
 					.addOption('s3', `Amazon S3 / ${backblazeB2}`)
-					.addOption('sftp', 'SFTP (SSH file transfer)')
+					.addOption('sftp', i18n.t('mountType.sftp'))
 					.setValue(this.mountType)
 					.onChange(val => toggleSections(val as MountType)));
 			toggleSections(this.mountType);
@@ -366,16 +384,15 @@ export class MountManagerModal extends Modal {
 
 		// ── Vault section (shown when type === 'vault') ────────────────────
 		vaultSection.createEl('p', {
-			text: 'Bridge to another Obsidian vault on this device. The vault\'s configuration folder (configDir) and .trash are automatically excluded. ' +
-				'Notes and attachments from the other vault appear as regular files in your current vault.',
+			text: i18n.t('vault.mountedDesc'),
 			cls: 'setting-item-description',
 		});
 		vaultSection.addClass('folderbridge-vault-section');
 
 		let vaultPathText: TextComponent | null = null;
 		new Setting(vaultSection)
-			.setName('Other vault root folder')
-			.setDesc('Absolute path to the root of the other Obsidian vault')
+			.setName(i18n.t('vault.otherVault.name'))
+			.setDesc(i18n.t('vault.otherVault.desc'))
 			.addText(text => {
 				vaultPathText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
@@ -387,11 +404,11 @@ export class MountManagerModal extends Modal {
 					});
 			})
 			.addButton(btn => {
-				btn.setButtonText('Browse…')
-					.setTooltip('Open the system folder picker')
+				btn.setButtonText(i18n.t('mountManager.browse'))
+					.setTooltip(i18n.t('mountManager.browseTooltip'))
 					.onClick(() => {
 						void (async () => {
-							const selected = await browseFolderOnDisk('Select other vault root');
+							const selected = await browseFolderOnDisk(i18n.t('mountManager.selectOtherVaultRoot'));
 							if (selected) {
 								this.realPath = selected;
 								vaultPathText?.setValue(selected);
@@ -405,11 +422,11 @@ export class MountManagerModal extends Modal {
 
 		/* Quick-fill presets — selecting one pre-populates Server URL so users
 		 * don't have to remember the /remote.php/dav/files/USERNAME/ pattern. */
-		const WEBDAV_PRESETS: Record<string, { urlTemplate: string; note: string }> = {
-			nextcloud: { urlTemplate: 'https://cloud.example.com/remote.php/dav/files/YOUR_USERNAME', note: 'Replace cloud.example.com and YOUR_USERNAME with your values.' },
-			owncloud: { urlTemplate: 'https://cloud.example.com/remote.php/dav/files/YOUR_USERNAME', note: 'Replace cloud.example.com and YOUR_USERNAME with your values.' },
-			synology: { urlTemplate: 'https://nas.example.com/webdav', note: 'Enable WebDAV in Synology Control Panel → File Services → WebDAV.' },
-			qnap: { urlTemplate: 'https://nas.example.com:8080/webdav', note: 'Enable WebDAV in QNAP Control Panel → Web Server → WebDAV Server.' },
+		const WEBDAV_PRESETS: Record<string, { urlTemplate: string; noteKey: string }> = {
+			nextcloud: { urlTemplate: 'https://cloud.example.com/remote.php/dav/files/YOUR_USERNAME', noteKey: 'preset.nextcloud.note' },
+			owncloud: { urlTemplate: 'https://cloud.example.com/remote.php/dav/files/YOUR_USERNAME', noteKey: 'preset.owncloud.note' },
+			synology: { urlTemplate: 'https://nas.example.com/webdav', noteKey: 'preset.synology.note' },
+			qnap: { urlTemplate: 'https://nas.example.com:8080/webdav', noteKey: 'preset.qnap.note' },
 		};
 
 		let presetNoteEl: HTMLParagraphElement | null = null;
@@ -417,10 +434,10 @@ export class MountManagerModal extends Modal {
 
 		if (!this.editMount) {
 			new Setting(webdavSection)
-				.setName('Quick-fill preset')
-				.setDesc('Optionally choose your service to pre-fill the server URL field below.')
+				.setName(i18n.t('preset.quickFill'))
+				.setDesc(i18n.t('preset.desc'))
 				.addDropdown(drop => {
-					drop.addOption('', '— select a preset —');
+					drop.addOption('', i18n.t('mountManager.preset.select'));
 					drop.addOption('nextcloud', 'Nextcloud');
 					drop.addOption('owncloud', `${ownCloud}`);
 					drop.addOption('synology', `${synologyLabel}`);
@@ -436,70 +453,68 @@ export class MountManagerModal extends Modal {
 						if (!presetNoteEl) {
 							presetNoteEl = webdavSection.createEl('p', { cls: 'folderbridge-preset-note' });
 						}
-						presetNoteEl.setText('💡 ' + preset.note);
+						presetNoteEl.setText('💡 ' + i18n.t(preset.noteKey));
 					});
 				});
 		}
 
 		new Setting(webdavSection)
-			.setName(`${webdav} server URL`)
-			.setDesc('Full URL to the WebDAV endpoint, e.g. https://cloud.example.com/remote.php/dav/files/username')
+			.setName(i18n.t('webdav.serverUrl.name'))
+			.setDesc(i18n.t('webdav.serverUrl.desc'))
 			.addText(text => {
 				webdavUrlText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('https://cloud.example.com/remote.php/dav/files/username')
+				text.setPlaceholder(i18n.t('webdav.serverUrl.placeholder'))
 					.setValue(this.webdavUrl)
 					.onChange(val => { this.webdavUrl = val.trim(); });
 			});
 
 		new Setting(webdavSection)
-			.setName('Remote base path')
-			.setDesc('Path on the WebDAV server to use as the mount root, e.g. / or /Documents. Use / for the server root.')
+			.setName(i18n.t('webdav.remotePath.name'))
+			.setDesc(i18n.t('webdav.remotePath.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('/')
+				text.setPlaceholder(i18n.t('webdav.remotePath.placeholder'))
 					.setValue(this.mountType === 'webdav' ? (this.realPath || '/') : '/')
 					.onChange(val => { this.realPath = val.trim() || '/'; });
 			});
 
 		new Setting(webdavSection)
-			.setName('Username')
+			.setName(i18n.t('webdav.username.name'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('Your-username')
+				text.setPlaceholder(i18n.t('webdav.username.placeholder'))
 					.setValue(this.webdavUsername)
 					.onChange(val => { this.webdavUsername = val.trim(); });
 			});
 
 		new Setting(webdavSection)
-			.setName('Password')
+			.setName(i18n.t('webdav.password.name'))
 			.setDesc(this.editMount?.mountType === 'webdav'
 				? (this.editMount.encryptedWebdavPassword
-					? 'Saved securely on this device. Leave blank to keep, or enter a new value to replace.'
-					: 'Leave blank to keep the existing password. Enter a new value to replace it.')
-				: 'Encrypted and saved on this device — survives Obsidian restarts.')
+					? i18n.t('webdav.password.saved')
+					: i18n.t('webdav.password.unchanged'))
+				: i18n.t('webdav.password.encrypted'))
 			.addText(text => {
 				text.inputEl.type = 'password';
 				text.inputEl.addClass('folderbridge-input-flex');
 				const hasStored = !!(this.editMount?.encryptedWebdavPassword);
-				text.setPlaceholder(hasStored ? '(saved — leave blank to keep)' : this.editMount?.mountType === 'webdav' ? '(unchanged)' : 'password')
+				text.setPlaceholder(hasStored ? i18n.t('webdav.password.savedPlaceholder') : this.editMount?.mountType === 'webdav' ? i18n.t('webdav.password.unchangedPlaceholder') : i18n.t('webdav.password.placeholder'))
 					.setValue('')
 					.onChange(val => { this.webdavPassword = val; });
 			});
 
 		// ── S3 / Backblaze B2 section ──────────────────────────────────────
 		s3Section.createEl('p', {
-			text: 'Mount an Amazon S3 bucket or a Backblaze B2 bucket via the S3-compatible API. ' +
-				'Files appear as regular notes in your vault. Note: S3 has no native folder rename — ' +
-				'renames are implemented as copy + delete, which may be slow for large directories.',
+			text: i18n.t('mountManager.s3Note'),
 			cls: 'setting-item-description',
 		});
 
-		const S3_PRESETS: Record<string, { region: string; endpoint: string; forcePathStyle: boolean; note: string }> = {
-			aws: { region: 'us-east-1', endpoint: '', forcePathStyle: false, note: 'Use an IAM user with S3 read/write permissions. Access key ID + secret access key.' },
-			b2: { region: 'us-west-004', endpoint: 'https://s3.us-west-004.backblazeb2.com', forcePathStyle: true, note: 'Use a Backblaze Application Key with read/write access to your bucket. Set endpoint to your bucket region.' },
-			minio: { region: 'us-east-1', endpoint: 'http://localhost:9000', forcePathStyle: true, note: 'Self-hosted MinIO. Path-style is required. Set endpoint to your MinIO URL.' },
-			cloudflare: { region: 'auto', endpoint: 'https://<ACCOUNT_ID>.r2.cloudflarestorage.com', forcePathStyle: false, note: 'Cloudflare R2. Replace <ACCOUNT_ID> with your Cloudflare account ID.' },
+		const S3_PRESETS: Record<string, { region: string; endpoint: string; forcePathStyle: boolean; noteKey: string }> = {
+			aws: { region: 'us-east-1', endpoint: '', forcePathStyle: false, noteKey: 'preset.aws.note' },
+			b2: { region: 'us-west-004', endpoint: 'https://s3.us-west-004.backblazeb2.com', forcePathStyle: true, noteKey: 'preset.b2.note' },
+			minio: { region: 'us-east-1', endpoint: 'http://localhost:9000', forcePathStyle: true, noteKey: 'preset.minio.note' },
+			cloudflare: { region: 'auto', endpoint: 'https://<ACCOUNT_ID>.r2.cloudflarestorage.com', forcePathStyle: false, noteKey: 'preset.cloudflare.note' },
 		};
 
 		let s3PresetNoteEl: HTMLParagraphElement | null = null;
@@ -509,10 +524,10 @@ export class MountManagerModal extends Modal {
 
 		if (!this.editMount) {
 			new Setting(s3Section)
-				.setName('Quick-fill preset')
-				.setDesc('Choose your S3-compatible service to pre-fill fields below.')
+				.setName(i18n.t('preset.quickFill'))
+				.setDesc(i18n.t('preset.s3Desc'))
 				.addDropdown(drop => {
-					drop.addOption('', '— select a preset —');
+					drop.addOption('', i18n.t('mountManager.preset.select'));
 					drop.addOption('aws', 'Amazon S3');
 					drop.addOption('b2', `${backblazeB2}`);
 					drop.addOption('minio', `${minio} (self-hosted)`);
@@ -530,46 +545,46 @@ export class MountManagerModal extends Modal {
 						if (!s3PresetNoteEl) {
 							s3PresetNoteEl = s3Section.createEl('p', { cls: 'folderbridge-preset-note' });
 						}
-						s3PresetNoteEl.setText(preset.note);
+						s3PresetNoteEl.setText(i18n.t(preset.noteKey));
 					});
 				});
 		}
 
 		new Setting(s3Section)
-			.setName('Bucket name')
-			.setDesc(`The S3 bucket or ${b2} bucket name (case-sensitive)`)
+			.setName(i18n.t('s3.bucket.name'))
+			.setDesc(i18n.t('s3.bucket.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('My-Obsidian-bucket')
+				text.setPlaceholder(i18n.t('s3.bucket.placeholder'))
 					.setValue(this.s3Bucket)
 					.onChange(val => { this.s3Bucket = val.trim(); });
 			});
 
 		new Setting(s3Section)
-			.setName('Region')
-			.setDesc(`${aws} region (for example us-east-1) or ${b2} region string (for example us-west-004)`)
+			.setName(i18n.t('s3.region.name'))
+			.setDesc(i18n.t('s3.region.desc'))
 			.addText(text => {
 				s3RegionText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('Us-east-1')
+				text.setPlaceholder(i18n.t('s3.region.placeholder'))
 					.setValue(this.s3Region)
 					.onChange(val => { this.s3Region = val.trim(); });
 			});
 
 		new Setting(s3Section)
-			.setName('Custom endpoint URL (optional)')
-			.setDesc('Leave empty for AWS S3. For Backblaze B2 set to your region endpoint, e.g. https://s3.us-west-004.backblazeb2.com')
+			.setName(i18n.t('s3.endpoint.name'))
+			.setDesc(i18n.t('s3.endpoint.desc'))
 			.addText(text => {
 				s3EndpointText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('https://s3.us-west-004.backblazeb2.com  (leave blank for AWS)')
+				text.setPlaceholder(i18n.t('s3.endpoint.placeholder'))
 					.setValue(this.s3Endpoint)
 					.onChange(val => { this.s3Endpoint = val.trim(); });
 			});
 
 		new Setting(s3Section)
-			.setName('Key prefix / path')
-			.setDesc('Optional folder prefix inside the bucket to use as the mount root, e.g. / for bucket root or /notes/ for a sub-folder.')
+			.setName(i18n.t('s3.keyPrefix.name'))
+			.setDesc(i18n.t('s3.keyPrefix.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
 				text.setPlaceholder('/')
@@ -578,34 +593,34 @@ export class MountManagerModal extends Modal {
 			});
 
 		new Setting(s3Section)
-			.setName('Access key ID')
-			.setDesc(`${iam} access key ID (${aws}) or application key ID (${backblazeB2})`)
+			.setName(i18n.t('s3.accessKeyId.name'))
+			.setDesc(i18n.t('s3.accessKeyId.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('AKIAIOSFODNN7EXAMPLE')
+				text.setPlaceholder(i18n.t('s3.accessKeyId.placeholder'))
 					.setValue(this.s3AccessKeyId)
 					.onChange(val => { this.s3AccessKeyId = val.trim(); });
 			});
 
 		new Setting(s3Section)
-			.setName('Secret access key')
+			.setName(i18n.t('s3.secretKey.name'))
 			.setDesc(this.editMount?.mountType === 's3'
 				? (this.editMount.encryptedS3SecretKey
-					? 'Saved securely on this device. Leave blank to keep, or enter a new value to replace.'
-					: 'Leave blank to keep the existing key. Enter a new value to replace it.')
-				: 'Encrypted and saved on this device — survives Obsidian restarts.')
+					? i18n.t('s3.secretKey.saved')
+					: i18n.t('s3.secretKey.unchanged'))
+				: i18n.t('s3.secretKey.encrypted'))
 			.addText(text => {
 				text.inputEl.type = 'password';
 				text.inputEl.addClass('folderbridge-input-flex');
 				const hasStored = !!(this.editMount?.encryptedS3SecretKey);
-				text.setPlaceholder(hasStored ? '(saved — leave blank to keep)' : 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
+				text.setPlaceholder(hasStored ? i18n.t('s3.secretKey.savedPlaceholder') : i18n.t('s3.secretKey.placeholder'))
 					.setValue('')
 					.onChange(val => { this.s3SecretKey = val; });
 			});
 
 		new Setting(s3Section)
-			.setName('Force path-style addressing')
-			.setDesc(`Required for ${backblazeB2}, ${minio}, and most self-hosted S3 servers. Leave off for Amazon S3 and ${cloudflareR2}.`)
+			.setName(i18n.t('s3.forcePathStyle.name'))
+			.setDesc(i18n.t('s3.forcePathStyle.desc'))
 			.addToggle(toggle => {
 				s3PathStyleToggle = toggle;
 				toggle.setValue(this.s3ForcePathStyle)
@@ -614,29 +629,27 @@ export class MountManagerModal extends Modal {
 
 		// ── SFTP section ────────────────────────────────────────────────
 		sftpSection.createEl('p', {
-			text: 'Mount a remote directory over SSH/SFTP. Requires a network connection. ' +
-				'The remote server must have an SFTP subsystem enabled (standard on OpenSSH). ' +
-				'SFTP mounts are desktop-only.',
+			text: i18n.t('mountManager.sftpNote'),
 			cls: 'setting-item-description',
 		});
 
 		new Setting(sftpSection)
-			.setName('Host')
-			.setDesc('Hostname or IP address of the SFTP server')
+			.setName(i18n.t('sftp.host.name'))
+			.setDesc(i18n.t('sftp.host.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('Files.example.com')
+				text.setPlaceholder(i18n.t('sftp.host.placeholder'))
 					.setValue(this.sftpHost)
 					.onChange(val => { this.sftpHost = val.trim(); });
 			});
 
 		new Setting(sftpSection)
-			.setName('Port')
-			.setDesc('SSH port (default 22)')
+			.setName(i18n.t('sftp.port.name'))
+			.setDesc(i18n.t('sftp.port.desc'))
 			.addText(text => {
 				text.inputEl.type = 'number';
 				text.inputEl.addClass('folderbridge-input-narrow');
-				text.setPlaceholder('22')
+				text.setPlaceholder(i18n.t('sftp.port.placeholder'))
 					.setValue(String(this.sftpPort))
 					.onChange(val => {
 						const n = parseInt(val, 10);
@@ -645,62 +658,62 @@ export class MountManagerModal extends Modal {
 			});
 
 		new Setting(sftpSection)
-			.setName('Username')
+			.setName(i18n.t('sftp.username.name'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('Alice')
+				text.setPlaceholder(i18n.t('sftp.username.placeholder'))
 					.setValue(this.sftpUsername)
 					.onChange(val => { this.sftpUsername = val.trim(); });
 			});
 
 		new Setting(sftpSection)
-			.setName('Remote base path')
-			.setDesc('Absolute path on the remote server to use as the mount root, e.g. /home/alice/notes')
+			.setName(i18n.t('sftp.remotePath.name'))
+			.setDesc(i18n.t('sftp.remotePath.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('/home/alice/notes')
+				text.setPlaceholder(i18n.t('sftp.remotePath.placeholder'))
 					.setValue(this.mountType === 'sftp' ? (this.realPath || '/home') : '/home')
 					.onChange(val => { this.realPath = val.trim() || '/'; });
 			});
 
 		new Setting(sftpSection)
-			.setName('Password')
+			.setName(i18n.t('sftp.password.name'))
 			.setDesc(this.editMount?.mountType === 'sftp'
 				? (this.editMount.encryptedSftpPassword
-					? 'Saved securely on this device. Leave blank to keep, or enter a new value to replace.'
-					: 'Leave blank to keep the existing password.')
-				: 'Used for password authentication. Leave blank if using a private key below.')
+					? i18n.t('sftp.password.saved')
+					: i18n.t('sftp.password.unchanged'))
+				: i18n.t('sftp.password.newDesc'))
 			.addText(text => {
 				text.inputEl.type = 'password';
 				text.inputEl.addClass('folderbridge-input-flex');
 				const hasStored = !!(this.editMount?.encryptedSftpPassword);
-				text.setPlaceholder(hasStored ? '(saved — leave blank to keep)' : 'password (or leave blank for key auth)')
+				text.setPlaceholder(hasStored ? i18n.t('sftp.password.savedPlaceholder') : i18n.t('sftp.password.placeholder'))
 					.setValue('')
 					.onChange(val => { this.sftpPassword = val; });
 			});
 
 		new Setting(sftpSection)
-			.setName('Private key file path (optional)')
-			.setDesc('Absolute path to your SSH private key file on this device, e.g. /home/alice/.ssh/id_ed25519. Leave blank for password auth.')
+			.setName(i18n.t('sftp.privateKey.name'))
+			.setDesc(i18n.t('sftp.privateKey.desc'))
 			.addText(text => {
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('/home/yourname/.ssh/id_ed25519')
+				text.setPlaceholder(i18n.t('sftp.privateKey.placeholder'))
 					.setValue(this.sftpPrivateKeyPath)
 					.onChange(val => { this.sftpPrivateKeyPath = val.trim(); });
 			});
 
 		new Setting(sftpSection)
-			.setName('Private key passphrase (optional)')
+			.setName(i18n.t('sftp.passphrase.name'))
 			.setDesc(this.editMount?.mountType === 'sftp'
 				? (this.editMount.encryptedSftpPassphrase
-					? 'Saved securely on this device. Leave blank to keep.'
-					: 'Leave blank to keep the existing passphrase.')
-				: 'Only needed if your private key is passphrase-protected.')
+					? i18n.t('sftp.passphrase.savedDesc')
+					: i18n.t('sftp.passphrase.unchangedDesc'))
+				: i18n.t('sftp.passphrase.neededDesc'))
 			.addText(text => {
 				text.inputEl.type = 'password';
 				text.inputEl.addClass('folderbridge-input-flex');
 				const hasStored = !!(this.editMount?.encryptedSftpPassphrase);
-				text.setPlaceholder(hasStored ? '(saved — leave blank to keep)' : 'passphrase (if key is encrypted)')
+				text.setPlaceholder(hasStored ? i18n.t('sftp.passphrase.savedPlaceholder') : i18n.t('sftp.passphrase.placeholder'))
 					.setValue('')
 					.onChange(val => { this.sftpPassphrase = val; });
 			});
@@ -720,8 +733,8 @@ export class MountManagerModal extends Modal {
 
 		// ── Real path ──────────────────────────────────────────────────────
 		const realPathSetting = new Setting(localSection)
-			.setName('Real path (on disk)')
-			.setDesc('Absolute path to the external folder you want to mount')
+			.setName(i18n.t('vault.realPath.name'))
+			.setDesc(i18n.t('vault.realPath.desc'))
 			.addText(text => {
 				this.realPathText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
@@ -733,11 +746,11 @@ export class MountManagerModal extends Modal {
 					});
 			})
 			.addButton(btn => {
-				btn.setButtonText('Browse…')
-					.setTooltip('Open the system folder picker')
+				btn.setButtonText(i18n.t('mountManager.browse'))
+					.setTooltip(i18n.t('mountManager.browseTooltip'))
 					.onClick(() => {
 						void (async () => {
-							const selected = await browseFolderOnDisk('Select external folder');
+							const selected = await browseFolderOnDisk(i18n.t('mountManager.selectExternalFolder'));
 							if (selected) {
 								this.realPath = selected;
 								this.realPathText?.setValue(selected);
@@ -745,16 +758,16 @@ export class MountManagerModal extends Modal {
 							}
 						})();
 					});
-				btn.buttonEl.setAttribute('aria-label', 'Browse for folder on disk');
+				btn.buttonEl.setAttribute('aria-label', i18n.t('mountManager.browseAriaLabel'));
 			});
 
 		if (platform === 'windows') {
 			realPathSetting.addButton(btn => {
-				btn.setButtonText(`Browse ${wslLabel}…`)
-					.setTooltip(`Open the system folder picker directly to your ${wslLabel} Linux distributions`)
+				btn.setButtonText(i18n.t('mountState.wslBrowse'))
+					.setTooltip(i18n.t('mountState.wslBrowse.tooltip'))
 					.onClick(() => {
 						void (async () => {
-							const selected = await browseFolderOnDisk('Select WSL folder', '\\\\wsl.localhost');
+							const selected = await browseFolderOnDisk(i18n.t('mountManager.selectWslFolder'), '\\\\wsl.localhost');
 							if (selected) {
 								this.realPath = selected;
 								this.realPathText?.setValue(selected);
@@ -762,78 +775,72 @@ export class MountManagerModal extends Modal {
 							}
 						})();
 					});
-				btn.buttonEl.setAttribute('aria-label', `Browse for ${wslLabel} folder`);
+				btn.buttonEl.setAttribute('aria-label', i18n.t('mountManager.browseForLabel', { label: wslLabel }));
 			});
 		}
 
 		// WSL context hints
 		if (platform === 'windows') {
 			localSection.createEl('p', {
-				text: 'WSL tip: To mount a Linux (WSL 2) folder in Windows Obsidian, use ' +
-					'\\\\wsl.localhost\\<Distro>\\path (Windows 11 / Win 10 21H1+) ' +
-					'or \\\\wsl$\\<Distro>\\path (older Windows 10). ' +
-					'You can type either path in the browse dialog address bar.',
+				text: i18n.t('mountManager.wslTip1') + ' ' +
+					i18n.t('mountManager.wslPath1') + ' ' +
+					i18n.t('mountManager.wslTipOr') + ' ' +
+					i18n.t('mountManager.wslPath2') + '. ' +
+					i18n.t('mountManager.wslTipAddressBar'),
 				cls: 'setting-item-description',
 			});
 		} else if (wsl) {
 			localSection.createEl('p', {
-				text: 'WSL tip: Windows drives are accessible at /mnt/c/, /mnt/d/, etc. ' +
-					'To let Windows-side Obsidian see this folder, use ' +
-					'\\\\wsl.localhost\\<Distro>\\path (Windows 11 / Win 10 21H1+) ' +
-					'or \\\\wsl$\\<Distro>\\path (older Windows 10).',
+				text: i18n.t('mountManager.wslTip2') + ' ' +
+					i18n.t('mountManager.wslPath1') + ' ' +
+					i18n.t('mountManager.wslTipOr') + ' ' +
+					i18n.t('mountManager.wslPath2') + '.',
 				cls: 'setting-item-description',
 			});
 		}
 
 		let fallbackPathText: import('obsidian').TextComponent | null = null;
 		new Setting(localSection)
-			.setName('Fallback path (optional)')
-			.setDesc(
-				'Alternative folder tried automatically if the real path above is not ' +
-				'accessible on this machine. Useful for cross-platform vaults.'
-			)
+			.setName(i18n.t('vault.fallbackPath.name'))
+			.setDesc(i18n.t('vault.fallbackPath.desc'))
 			.addText(text => {
 				fallbackPathText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
 				text.inputEl.addClass('folderbridge-input-min-200');
-				text.setPlaceholder('Enter a fallback folder path for this device')
+				text.setPlaceholder(i18n.t('vault.fallbackPath.placeholder'))
 					.setValue(this.fallbackRealPath)
 					.onChange(val => { this.fallbackRealPath = val.trim(); });
 			})
 			.addButton(btn => {
-				btn.setButtonText('Browse…')
-					.setTooltip('Open the system folder picker')
+				btn.setButtonText(i18n.t('mountManager.browse'))
+					.setTooltip(i18n.t('mountManager.browseTooltip'))
 					.onClick(() => {
 						void (async () => {
-							const selected = await browseFolderOnDisk('Select fallback folder');
+							const selected = await browseFolderOnDisk(i18n.t('mountManager.selectFallbackFolder'));
 							if (selected) {
 								this.fallbackRealPath = selected;
 								fallbackPathText?.setValue(selected);
 							}
 						})();
 					});
-				btn.buttonEl.setAttribute('aria-label', 'Browse for fallback folder on disk');
+				btn.buttonEl.setAttribute('aria-label', i18n.t('mountManager.browseFallbackAriaLabel'));
 			});
 
 		// ── Virtual path ───────────────────────────────────────────────────
 		new Setting(contentEl)
 			.setClass('folderbridge-path-setting')
-			.setName('Virtual path (in vault)')
-			.setDesc(
-				'Where this folder will appear inside your vault, e.g. "Projects/Work". ' +
-				'Use "Browse vault…" to pick an existing vault folder as the parent, ' +
-				'then refine the leaf name. Leave empty to use the real folder\'s name at the vault root.'
-			)
+			.setName(i18n.t('mountManager.virtualPath.name'))
+			.setDesc(i18n.t('mountManager.virtualPath.desc'))
 			.addText(text => {
 				this.virtualPathText = text;
 				text.inputEl.addClass('folderbridge-input-flex');
-				text.setPlaceholder('Projects/work')
+				text.setPlaceholder(i18n.t('mountManager.virtualPath.placeholder'))
 					.setValue(this.virtualPath)
 					.onChange(val => { this.virtualPath = val.trim(); });
 			})
 			.addButton(btn => {
-				btn.setButtonText('Browse vault…')
-					.setTooltip('Pick an existing vault folder as the parent directory')
+				btn.setButtonText(i18n.t('mountManager.browseVault'))
+					.setTooltip(i18n.t('mountManager.browseVaultTooltip'))
 					.onClick(() => {
 						new VaultFolderPickerModal(this.app, (chosen) => {
 							// `chosen` is '' for vault root, or an existing folder path.
@@ -851,16 +858,13 @@ export class MountManagerModal extends Modal {
 							this.virtualPathText?.setValue(combined);
 						}).open();
 					});
-				btn.buttonEl.setAttribute('aria-label', 'Browse vault folders');
+				btn.buttonEl.setAttribute('aria-label', i18n.t('mountManager.browseVaultFolders'));
 			});
 
 		// ── Use folder name as label ───────────────────────────────────────
 		new Setting(contentEl)
-			.setName('Use folder name as label')
-			.setDesc(
-				'Automatically fill the label below with the real folder\'s name. ' +
-				'The label is what appears in the settings panel instead of the full path.'
-			)
+			.setName(i18n.t('mountManager.useFolderNameAsLabel'))
+			.setDesc(i18n.t('mountManager.useFolderNameAsLabel.desc'))
 			.addToggle(toggle => toggle
 				.setValue(this.useFolderNameAsLabel)
 				.onChange(val => {
@@ -877,39 +881,344 @@ export class MountManagerModal extends Modal {
 
 		// ── Label ──────────────────────────────────────────────────────────
 		new Setting(contentEl)
-			.setName('Label (optional)')
-			.setDesc('Display name shown in the settings panel instead of the virtual path')
+			.setName(i18n.t('mountManager.label.name'))
+			.setDesc(i18n.t('mountManager.label.desc'))
 			.addText(text => {
 				this.labelText = text;
-				text.setPlaceholder('My work documents')
+				text.setPlaceholder(i18n.t('mountManager.label.placeholder'))
 					.setValue(this.label)
-					.onChange(val => { this.label = val.trim(); });
+					.onChange(val => {
+						this.label = val.trim();
+						// Update default tags for new mounts when label changes
+						if (!this.editMount) {
+							this.tags = this.getDefaultTags();
+							tagsText?.setValue(this.tags.join(', '));
+						}
+					});
 			});
 
 		// ── Read-only ──────────────────────────────────────────────────────
 		new Setting(contentEl)
-			.setName('Read-only')
+			.setName(i18n.t('mountManager.readOnly'))
 			.setDesc(`When enabled, ${this.pluginName} will refuse any write operations to this mount`)
 			.addToggle(toggle => toggle
 				.setValue(this.readOnly)
 				.onChange(val => { this.readOnly = val; }));
-		// ── Advanced (collapsible) ─────────────────────────────────────────────
+
+		// ── Additional settings (collapsible) ──────────────────────────────
+		const additionalDetails = contentEl.createEl('details', { cls: 'folderbridge-additional' });
+		additionalDetails.createEl('summary', { text: i18n.t('mountManager.additionalSettings') });
+
+		const additionalContainer = additionalDetails.createDiv();
+
+		// ── Tags ───────────────────────────────────────────────────────────
+		let tagsText: TextComponent | null = null;
+		new Setting(additionalContainer)
+			.setName(i18n.t('mountManager.tags.name'))
+			.setDesc(i18n.t('mountManager.tags.desc'))
+			.addText(text => {
+				tagsText = text;
+				text.inputEl.addClass('folderbridge-input-flex');
+				text.setPlaceholder(i18n.t('mountManager.tags.placeholder'))
+					.setValue(this.tags.join(', '))
+					.onChange(val => { this.tags = this.parseTags(val); });
+			});
+
+		// ── Priority ───────────────────────────────────────────────────────
+		new Setting(additionalContainer)
+			.setName(i18n.t('mountManager.priority.name'))
+			.setDesc(i18n.t('mountManager.priority.desc'))
+			.addText(text => {
+				text.inputEl.type = 'number';
+				text.inputEl.min = '0';
+				text.inputEl.addClass('folderbridge-input-narrow');
+				text.setPlaceholder(i18n.t('mountManager.priority.placeholder'))
+					.setValue(String(this.priority))
+					.onChange(val => {
+						const n = parseInt(val, 10);
+						this.priority = isNaN(n) || n < 0 ? 1000 : n;
+					});
+			});
+
+		// ── Add command to palette ─────────────────────────────────────────
+		new Setting(additionalContainer)
+			.setName(i18n.t('mountManager.addCommand.name'))
+			.setDesc(i18n.t('mountManager.addCommand.desc'))
+			.addToggle(toggle => toggle
+				.setValue(this.addCommand)
+				.onChange(val => { this.addCommand = val; }));
+
+		// ── Large file transfer warning ────────────────────────────────────
+		new Setting(additionalContainer)
+			.setName(i18n.t('mountManager.largeFileWarning.name'))
+			.setDesc(i18n.t('mountManager.largeFileWarning.desc'))
+			.addToggle(toggle => toggle
+				.setValue(this.enableLargeFileConfirm)
+				.onChange(val => { this.enableLargeFileConfirm = val; }));
+
+		new Setting(additionalContainer)
+			.setName(i18n.t('mountManager.largeFileWarning.threshold.name'))
+			.setDesc(i18n.t('mountManager.largeFileWarning.threshold.desc'))
+			.addText(text => {
+				text.inputEl.type = 'number';
+				text.inputEl.min = '1';
+				text.inputEl.addClass('folderbridge-input-narrow');
+				text.setPlaceholder(i18n.t('mountManager.largeFileWarning.threshold.placeholder'))
+					.setValue(this.largeFileThresholdKB != null ? String(this.largeFileThresholdKB) : '')
+					.onChange(val => {
+						const n = parseInt(val, 10);
+						this.largeFileThresholdKB = isNaN(n) || n <= 0 ? undefined : n;
+					});
+			});
+
+		// ── Explorer highlight color ─────────────────────────────────────
+		const highlightColors = [
+			{ value: '', label: i18n.t('mountManager.highlightColor.none'), color: '' },
+			{ value: '#4a90d9', label: i18n.t('mountManager.highlightColor.blue'), color: '#4a90d9' },
+			{ value: '#e67e22', label: i18n.t('mountManager.highlightColor.orange'), color: '#e67e22' },
+			{ value: '#27ae60', label: i18n.t('mountManager.highlightColor.green'), color: '#27ae60' },
+			{ value: '#e74c3c', label: i18n.t('mountManager.highlightColor.red'), color: '#e74c3c' },
+			{ value: '#9b59b6', label: i18n.t('mountManager.highlightColor.purple'), color: '#9b59b6' },
+			{ value: '#1abc9c', label: i18n.t('mountManager.highlightColor.teal'), color: '#1abc9c' },
+			{ value: '#f39c12', label: i18n.t('mountManager.highlightColor.yellow'), color: '#f39c12' },
+		];
+
+		// Track current state
+		let currentColor = this.highlightColor; // The actual value stored ('' or hex)
+		
+		// Determine initial preset selection based on current color
+		let currentPresetValue: string;
+		if (!currentColor) {
+			currentPresetValue = ''; // None
+		} else {
+			const presetIdx = findPresetIndex(currentColor);
+			currentPresetValue = presetIdx >= 0 ? highlightColors[presetIdx].value : '__custom__';
+		}
+
+		// Helper: find preset index by color value
+		function findPresetIndex(color: string): number {
+			if (!color) return 0; // None
+			const idx = highlightColors.findIndex(hc => hc.value && hc.color === color.toLowerCase());
+			return idx >= 0 ? idx : -1;
+		}
+
+		// Helper: normalize color for comparison (lowercase, trim)
+		function normalizeColor(color: string): string {
+			return color.trim().toLowerCase();
+		}
+
+		// Custom dropdown with colored swatches (option elements don't support background-color in any browser)
+		const dropdownWrapper = document.createElement('div');
+		dropdownWrapper.style.position = 'relative';
+		dropdownWrapper.style.display = 'inline-block';
+		dropdownWrapper.style.width = '100%';
+
+		const dropdownTrigger = document.createElement('div');
+		dropdownTrigger.className = 'mod-dropdown';
+		dropdownTrigger.style.cursor = 'pointer';
+		dropdownTrigger.style.padding = '8px';
+		dropdownTrigger.style.border = '1px solid var(--background-modifier-border)';
+		dropdownTrigger.style.borderRadius = '4px';
+		dropdownTrigger.style.backgroundColor = 'var(--background-primary)';
+		dropdownTrigger.style.color = 'var(--text-normal)';
+		dropdownTrigger.style.userSelect = 'none';
+
+		const dropdownMenu = document.createElement('div');
+		dropdownMenu.style.display = 'none';
+		dropdownMenu.style.position = 'absolute';
+		dropdownMenu.style.top = '100%';
+		dropdownMenu.style.left = '0';
+		dropdownMenu.style.right = '0';
+		dropdownMenu.style.backgroundColor = 'var(--background-primary)';
+		dropdownMenu.style.border = '1px solid var(--background-modifier-border)';
+		dropdownMenu.style.borderRadius = '4px';
+		dropdownMenu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+		dropdownMenu.style.zIndex = '1000';
+		dropdownMenu.style.maxHeight = '280px';
+		dropdownMenu.style.overflowY = 'auto';
+
+		// Add "Custom" option at the end
+		const customOption = { value: '__custom__', label: 'Custom...', color: '' };
+		const allOptions = [...highlightColors, customOption];
+
+		for (const opt of allOptions) {
+			const menuOption = document.createElement('div');
+			menuOption.style.display = 'flex';
+			menuOption.style.alignItems = 'center';
+			menuOption.style.gap = '8px';
+			menuOption.style.padding = '8px 12px';
+			menuOption.style.cursor = 'pointer';
+			menuOption.style.color = 'var(--text-normal)';
+			menuOption.style.fontSize = 'var(--font-ui-small)';
+
+			// Color swatch (skip for Custom option)
+			if (opt.value !== '__custom__') {
+				const swatch = document.createElement('span');
+				swatch.style.width = '16px';
+				swatch.style.height = '16px';
+				swatch.style.borderRadius = '3px';
+				swatch.style.border = opt.color ? 'none' : '1px solid var(--text-muted)';
+				if (opt.color) {
+					swatch.style.backgroundColor = opt.color;
+				} else {
+					swatch.style.backgroundColor = 'var(--background-primary)';
+				}
+				menuOption.appendChild(swatch);
+			} else {
+				// Placeholder for alignment
+				const spacer = document.createElement('span');
+				spacer.style.width = '16px';
+				spacer.style.height = '16px';
+				menuOption.appendChild(spacer);
+			}
+
+			// Label
+			const labelSpan = document.createElement('span');
+			labelSpan.textContent = opt.label;
+			menuOption.appendChild(labelSpan);
+
+			menuOption.addEventListener('mouseenter', () => {
+				menuOption.style.backgroundColor = 'var(--background-modifier-hover)';
+			});
+			menuOption.addEventListener('mouseleave', () => {
+				menuOption.style.backgroundColor = '';
+			});
+			menuOption.addEventListener('click', () => {
+				if (opt.value === '__custom__') {
+					// Focus the color picker when Custom is selected
+					colorInput.focus();
+					return;
+				}
+				currentColor = opt.value;
+				currentPresetValue = opt.value;
+				this.highlightColor = opt.value;
+				updateColorPicker();
+				updateTrigger();
+				dropdownMenu.style.display = 'none';
+			});
+
+			dropdownMenu.appendChild(menuOption);
+		}
+
+		// Update dropdown trigger display
+		function updateTrigger(): void {
+			const selected = allOptions.find(opt => opt.value === currentPresetValue) || allOptions[0];
+			dropdownTrigger.innerHTML = '';
+			if (selected.value !== '__custom__') {
+				const swatch = document.createElement('span');
+				swatch.style.width = '16px';
+				swatch.style.height = '16px';
+				swatch.style.borderRadius = '3px';
+				swatch.style.border = selected.color ? 'none' : '1px solid var(--text-muted)';
+				if (selected.color) {
+					swatch.style.backgroundColor = selected.color;
+				} else {
+					swatch.style.backgroundColor = 'var(--background-primary)';
+				}
+				swatch.style.marginRight = '8px';
+				dropdownTrigger.appendChild(swatch);
+			}
+			const labelSpan = document.createElement('span');
+			labelSpan.textContent = selected.label;
+			dropdownTrigger.appendChild(labelSpan);
+		}
+
+		// Color picker input
+		const colorPickerContainer = document.createElement('div');
+		colorPickerContainer.style.display = 'flex';
+		colorPickerContainer.style.alignItems = 'center';
+		colorPickerContainer.style.marginLeft = '8px';
+
+		const colorInput = document.createElement('input');
+		colorInput.type = 'color';
+		colorInput.style.width = '32px';
+		colorInput.style.height = '32px';
+		colorInput.style.border = '1px solid var(--background-modifier-border)';
+		colorInput.style.borderRadius = '4px';
+		colorInput.style.padding = '2px';
+		colorInput.style.cursor = 'pointer';
+		colorInput.style.backgroundColor = 'var(--background-primary)';
+
+		function updateColorPicker(): void {
+			if (!currentColor) {
+				// "None" — use a neutral/default color
+				colorInput.value = '#808080';
+			} else {
+				colorInput.value = currentColor.toLowerCase();
+			}
+		}
+
+		colorInput.addEventListener('input', (e) => {
+			const selectedColor = (e.target as HTMLInputElement).value;
+			currentColor = selectedColor;
+			this.highlightColor = selectedColor;
+
+			// Check if this color matches a preset
+			const presetIdx = findPresetIndex(selectedColor);
+			if (presetIdx >= 0) {
+				currentPresetValue = highlightColors[presetIdx].value;
+			} else {
+				currentPresetValue = '__custom__';
+			}
+
+			updateTrigger();
+		});
+
+		colorPickerContainer.appendChild(colorInput);
+
+		// Initialize UI state
+		updateColorPicker();
+		updateTrigger();
+
+		dropdownTrigger.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const isOpen = dropdownMenu.style.display === 'block';
+			dropdownMenu.style.display = isOpen ? 'none' : 'block';
+		});
+
+		dropdownWrapper.appendChild(dropdownTrigger);
+		dropdownWrapper.appendChild(dropdownMenu);
+
+		// Close dropdown when clicking outside
+		this._closeDropdownHandler = (e: MouseEvent) => {
+			if (!dropdownWrapper.contains(e.target as Node)) {
+				dropdownMenu.style.display = 'none';
+			}
+		};
+		document.addEventListener('click', this._closeDropdownHandler, true);
+
+		// Create setting with both dropdown and color picker
+		const setting = new Setting(additionalContainer)
+			.setName(i18n.t('mountManager.highlightColor.name'))
+			.setDesc(i18n.t('mountManager.highlightColor.desc'));
+
+		const controlContainer = document.createElement('div');
+		controlContainer.style.display = 'flex';
+		controlContainer.style.alignItems = 'center';
+		controlContainer.style.width = '100%';
+		controlContainer.appendChild(dropdownWrapper);
+		controlContainer.appendChild(colorPickerContainer);
+
+		setting.settingEl.appendChild(controlContainer);
+
+		// ── Advanced settings (collapsible, desktop-only) ──────────────────
 		const details = contentEl.createEl('details', { cls: 'folderbridge-advanced' });
 		// File-watcher settings are desktop-only; hide the entire Advanced section on mobile.
 		if (isMobile) details.addClass('folderbridge-hidden');
-		details.createEl('summary', { text: 'Advanced settings' });
+		details.createEl('summary', { text: i18n.t('mountManager.advancedSettings') });
 
 		const advancedContainer = details.createDiv();
 
+		// ── Advanced settings (file-watcher + performance) ─────────────────
 		new Setting(advancedContainer)
-			.setName('Debounce threshold (ms)')
-			.setDesc('How long to wait after the last change event before notifying Obsidian. Increase for editors that save very frequently. (default: 300)')
+			.setName(i18n.t('watcher.debounce.name'))
+			.setDesc(i18n.t('watcher.debounce.desc'))
 			.addText(text => {
 				text.inputEl.type = 'number';
 				text.inputEl.min = '50';
 				text.inputEl.max = '5000';
 				text.inputEl.addClass('folderbridge-input-narrow');
-				text.setPlaceholder('300')
+				text.setPlaceholder(i18n.t('watcher.debounce.placeholder'))
 					.setValue(this.watcherDebounceMs != null ? String(this.watcherDebounceMs) : '')
 					.onChange(val => {
 						const n = parseInt(val, 10);
@@ -926,7 +1235,7 @@ export class MountManagerModal extends Modal {
 		};
 
 		new Setting(advancedContainer)
-			.setName('Use polling')
+			.setName(i18n.t('watcher.polling.name'))
 			.setDesc(`Poll for changes instead of native OS events. Required for ${nas} drives and network shares where native filesystem events are unreliable.`)
 			.addToggle(toggle => toggle
 				.setValue(this.watcherUsePolling)
@@ -936,14 +1245,14 @@ export class MountManagerModal extends Modal {
 				}));
 
 		pollingIntervalSetting = new Setting(advancedContainer)
-			.setName('Polling interval (ms)')
-			.setDesc('How often to poll the filesystem for changes. Only effective when "use polling" is on. (default: 2000)')
+			.setName(i18n.t('watcher.pollingInterval.name'))
+			.setDesc(i18n.t('watcher.pollingInterval.desc'))
 			.addText(text => {
 				text.inputEl.type = 'number';
 				text.inputEl.min = '500';
 				text.inputEl.max = '60000';
 				text.inputEl.addClass('folderbridge-input-narrow');
-				text.setPlaceholder('2000')
+				text.setPlaceholder(i18n.t('watcher.pollingInterval.placeholder'))
 					.setValue(this.watcherPollingIntervalMs != null ? String(this.watcherPollingIntervalMs) : '')
 					.onChange(val => {
 						const n = parseInt(val, 10);
@@ -953,56 +1262,39 @@ export class MountManagerModal extends Modal {
 		showHidePollingInterval(this.watcherUsePolling);
 
 		new Setting(advancedContainer)
-			.setName('Visible file types')
-			.setDesc(
-				'Limit which files in this mount are exposed to Obsidian. ' +
-				'Folders remain browsable, but only matching files appear in the file explorer, search, and startup scan.'
-			)
+			.setName(i18n.t('watcher.visibleFileTypes.name'))
+			.setDesc(i18n.t('watcher.visibleFileTypes.desc'))
 			.addDropdown(drop => drop
-				.addOption('all', 'All file types (default)')
-				.addOption('markdown-only', 'Markdown only (.md, .mdx, .canvas)')
-				.addOption('pdf-only', 'PDF only')
+				.addOption('all', i18n.t('watcher.visibleFileTypes.all'))
+				.addOption('markdown-only', i18n.t('watcher.visibleFileTypes.markdownOnly'))
+				.addOption('pdf-only', i18n.t('watcher.visibleFileTypes.pdfOnly'))
 				.setValue(this.visibleFileFilter)
 				.onChange((val) => { this.visibleFileFilter = val as 'all' | 'markdown-only' | 'pdf-only'; }));
 
 		new Setting(advancedContainer)
-			.setName('New file events')
-			.setDesc(
-				'Controls which new files the watcher announces to Obsidian. ' +
-				'"Markdown only" prevents automatic-attachment-rename plugins from ' +
-				'renaming images or PDFs that were created by another app inside this ' +
-				'mount. New non-markdown files will still appear after a manual refresh.'
-			)
+			.setName(i18n.t('watcher.newFileEvents.name'))
+			.setDesc(i18n.t('watcher.newFileEvents.desc'))
 			.addDropdown(drop => drop
-				.addOption('all', 'All file types (default)')
-				.addOption('markdown-only', 'Markdown only (prevents auto-rename)')
+				.addOption('all', i18n.t('watcher.newFileEvents.all'))
+				.addOption('markdown-only', i18n.t('watcher.newFileEvents.markdownOnly'))
 				.setValue(this.watcherCreateFilter)
 				.onChange((val) => { this.watcherCreateFilter = val as 'all' | 'markdown-only'; }));
 
 		new Setting(advancedContainer)
-			.setName('Suppress all watcher events')
-			.setDesc(
-				'When on, the file watcher monitors this folder but never forwards any ' +
-				'events to Obsidian. Useful when the folder is managed by an external ' +
-				'sync tool (rclone, Syncthing, Obsidian Sync on another vault, …) and you ' +
-				'do not want attachment-rename or note-refactor plugins to react to ' +
-				'incoming files. Files you create inside Obsidian (e.g. paste image from ' +
-				'clipboard) are unaffected — Obsidian fires its own internal event for those. ' +
-				'You can also toggle this at runtime via the command palette or from a script: ' +
-				'app.plugins.getPlugin(\'folderbridge\').setWatcherSuppressed(null, true).'
-			)
+			.setName(i18n.t('watcher.suppressAll.name'))
+			.setDesc(i18n.t('watcher.suppressAll.desc'))
 			.addToggle(toggle => toggle
 				.setValue(this.watcherSuppressAllEvents)
 				.onChange(val => { this.watcherSuppressAllEvents = val; }));
 
 		new Setting(advancedContainer)
-			.setName('Max files (scan limit)')
-			.setDesc('Stop the initial vault scan after this many items. Leave blank for unlimited. Use this to keep Obsidian responsive with very large mounts.')
+			.setName(i18n.t('watcher.maxFiles.name'))
+			.setDesc(i18n.t('watcher.maxFiles.desc'))
 			.addText(text => {
 				text.inputEl.type = 'number';
 				text.inputEl.min = '0';
 				text.inputEl.addClass('folderbridge-input-medium');
-				text.setPlaceholder('Unlimited')
+				text.setPlaceholder(i18n.t('watcher.maxFiles.placeholder'))
 					.setValue(this.maxFiles != null ? String(this.maxFiles) : '')
 					.onChange(val => {
 						const n = parseInt(val, 10);
@@ -1021,16 +1313,23 @@ export class MountManagerModal extends Modal {
 							this.submitState.finish();
 							this.syncSubmitButtons();
 							logger.error('Folder Bridge: Failed to save mount', err);
-							new Notice(`${this.pluginName}: failed to save mount. Check the developer console for details.`);
+							new Notice(i18n.t('mountManager.saveFailed'));
 						});
 					});
 			})
 			.addButton(btn => {
 				this.cancelButton = btn;
 				return btn
-					.setButtonText('Cancel')
+					.setButtonText(i18n.t('button.cancel'))
 					.onClick(() => this.close());
 			});
+
+		// Apply default tags for new mounts
+		if (!this.editMount) {
+			this.tags = this.getDefaultTags();
+			// tagsText is guaranteed to be initialized before this point
+			(tagsText as import('obsidian').TextComponent | null)?.setValue(this.tags.join(', '));
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -1040,12 +1339,48 @@ export class MountManagerModal extends Modal {
 	/**
 	 * If "use folder name as label" is active, overwrite the label field
 	 * with the basename of the current real path.
+	 * Also updates default tags for new mounts.
 	 */
 	private syncAutoLabel(): void {
 		if (!this.useFolderNameAsLabel) return;
 		const name = this.realPath ? path.basename(this.realPath) : '';
 		this.label = name;
 		this.labelText?.setValue(name);
+		// Update default tags for new mounts
+		if (!this.editMount) {
+			this.tags = this.getDefaultTags();
+		}
+	}
+
+	/**
+	 * Parse comma-separated tag string into an array of non-empty, trimmed tags.
+	 */
+	private parseTags(input: string): string[] {
+		return input
+			.split(',')
+			.map(t => t.trim())
+			.filter(t => t.length > 0);
+	}
+
+	/**
+	 * Get default tags for a new mount: "all" and optionally the label value.
+	 */
+	private getDefaultTags(): string[] {
+		const defaults: string[] = ['all'];
+		if (this.label && this.label.trim().length > 0) {
+			defaults.push(this.label.trim());
+		}
+		return defaults;
+	}
+
+	/**
+	 * Set default tags for a new mount based on current label.
+	 * Note: UI update is done after tagsText is initialized in onOpen.
+	 */
+	private applyDefaultTags(): void {
+		if (!this.editMount) {
+			this.tags = this.getDefaultTags();
+		}
 	}
 
 	private syncSubmitButtons(): void {
@@ -1072,32 +1407,32 @@ export class MountManagerModal extends Modal {
 			if (!this.s3Bucket) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: S3 bucket name is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('s3.bucket.name') }));
 				return;
 			}
 			if (!this.s3Region) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: S3 region is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('s3.region.name') }));
 				return;
 			}
 			if (!this.s3AccessKeyId) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: S3 access key ID is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('s3.accessKeyId.name') }));
 				return;
 			}
 			const hasStoredSecret = !!(this.editMount?.encryptedS3SecretKey);
 			if (!this.editMount && !this.s3SecretKey && !hasStoredSecret) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: S3 secret access key is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('s3.secretKey.name') }));
 				return;
 			}
 			if (!this.virtualPath.trim()) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: Virtual path is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('mountManager.virtualPath.name') }));
 				return;
 			}
 
@@ -1111,6 +1446,12 @@ export class MountManagerModal extends Modal {
 					enabled: this.editMount ? this.editMount.enabled : true,
 					readOnly: this.readOnly,
 					label: this.label || undefined,
+					addCommand: this.addCommand || undefined,
+					priority: this.priority,
+					tags: this.tags.length > 0 ? this.tags : undefined,
+					enableLargeFileConfirm: this.enableLargeFileConfirm || undefined,
+					largeFileThresholdKB: this.largeFileThresholdKB,
+					highlightColor: this.highlightColor || undefined,
 					mountType: 's3',
 					s3Bucket: this.s3Bucket,
 					s3Region: this.s3Region,
@@ -1132,13 +1473,13 @@ export class MountManagerModal extends Modal {
 			if (!this.sftpHost) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: SFTP host is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('sftp.host.name') }));
 				return;
 			}
 			if (!this.sftpUsername) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: SFTP username is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('sftp.username.name') }));
 				return;
 			}
 			const hasStoredPassword = !!(this.editMount?.encryptedSftpPassword);
@@ -1146,13 +1487,13 @@ export class MountManagerModal extends Modal {
 			if (!this.editMount && !this.sftpPassword && !hasStoredPassword && !hasKeyPath) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: SFTP password or private key path is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('sftp.password.name') }));
 				return;
 			}
 			if (!this.virtualPath.trim()) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: Virtual path is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('mountManager.virtualPath.name') }));
 				return;
 			}
 
@@ -1166,6 +1507,12 @@ export class MountManagerModal extends Modal {
 					enabled: this.editMount ? this.editMount.enabled : true,
 					readOnly: this.readOnly,
 					label: this.label || undefined,
+					addCommand: this.addCommand || undefined,
+					priority: this.priority,
+					tags: this.tags.length > 0 ? this.tags : undefined,
+					enableLargeFileConfirm: this.enableLargeFileConfirm || undefined,
+					largeFileThresholdKB: this.largeFileThresholdKB,
+					highlightColor: this.highlightColor || undefined,
 					mountType: 'sftp',
 					sftpHost: this.sftpHost,
 					sftpPort: this.sftpPort !== 22 ? this.sftpPort : undefined,
@@ -1187,19 +1534,19 @@ export class MountManagerModal extends Modal {
 			if (!this.webdavUrl) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: WebDAV server URL is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('webdav.serverUrl.name') }));
 				return;
 			}
 			try { new URL(this.webdavUrl); } catch {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: WebDAV URL is not valid. Include the scheme, e.g. https://…`);
+				new Notice(i18n.t('mountManager.urlInvalid'));
 				return;
 			}
 			if (!this.webdavUsername) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: WebDAV username is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('webdav.username.name') }));
 				return;
 			}
 			// Require a password on add unless an encrypted one is already stored
@@ -1208,13 +1555,13 @@ export class MountManagerModal extends Modal {
 			if (!this.editMount && !this.webdavPassword && !hasStoredPassword) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: WebDAV password is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('webdav.password.name') }));
 				return;
 			}
 			if (!this.virtualPath.trim()) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: Virtual path is required.`);
+				new Notice(i18n.t('mountManager.required', { field: i18n.t('mountManager.virtualPath.name') }));
 				return;
 			}
 
@@ -1228,6 +1575,12 @@ export class MountManagerModal extends Modal {
 					enabled: this.editMount ? this.editMount.enabled : true,
 					readOnly: this.readOnly,
 					label: this.label || undefined,
+					addCommand: this.addCommand || undefined,
+					priority: this.priority,
+					tags: this.tags.length > 0 ? this.tags : undefined,
+					enableLargeFileConfirm: this.enableLargeFileConfirm || undefined,
+					largeFileThresholdKB: this.largeFileThresholdKB,
+					highlightColor: this.highlightColor || undefined,
 					mountType: 'webdav',
 					webdavUrl: this.webdavUrl,
 					webdavUsername: this.webdavUsername,
@@ -1253,13 +1606,13 @@ export class MountManagerModal extends Modal {
 		if (!virtualPathToUse) {
 			this.submitState.finish();
 			this.syncSubmitButtons();
-			new Notice(`${this.pluginName}: Virtual path is required.`);
+			new Notice(i18n.t('mountManager.required', { field: i18n.t('mountManager.virtualPath.name') }));
 			return;
 		}
 		if (!this.realPath) {
 			this.submitState.finish();
 			this.syncSubmitButtons();
-			new Notice(`${this.pluginName}: Real path is required.`);
+			new Notice(i18n.t('mountManager.required', { field: i18n.t('vault.realPath.name') }));
 			return;
 		}
 
@@ -1280,7 +1633,7 @@ export class MountManagerModal extends Modal {
 		if (validationError) {
 			this.submitState.finish();
 			this.syncSubmitButtons();
-			new Notice(`Folder Bridge: ${validationError}`);
+			new Notice(i18n.t('notice.generic', { message: validationError }));
 			return;
 		}
 
@@ -1297,7 +1650,7 @@ export class MountManagerModal extends Modal {
 			if (!accessibleDirectory) {
 				this.submitState.finish();
 				this.syncSubmitButtons();
-				new Notice(`${this.pluginName}: No configured source path is an accessible directory.`);
+				new Notice(i18n.t('mountManager.noAccessiblePath'));
 				return;
 			}
 		}
@@ -1305,7 +1658,7 @@ export class MountManagerModal extends Modal {
 		// Non-blocking advisory warnings (e.g. UNC / network paths)
 		const warnings = this.security.getPathWarnings(this.realPath);
 		for (const w of warnings) {
-			new Notice(`Folder Bridge warning: ${w}`, 10_000);
+			new Notice(i18n.t('notice.warning', { message: w }), 10_000);
 		}
 
 		await this.onSave(
@@ -1316,6 +1669,12 @@ export class MountManagerModal extends Modal {
 				enabled: this.editMount ? this.editMount.enabled : true,
 				readOnly: this.readOnly,
 				label: this.label || undefined,
+				addCommand: this.addCommand || undefined,
+				priority: this.priority,
+				tags: this.tags.length > 0 ? this.tags : undefined,
+				enableLargeFileConfirm: this.enableLargeFileConfirm || undefined,
+				largeFileThresholdKB: this.largeFileThresholdKB,
+				highlightColor: this.highlightColor || undefined,
 				mountType: this.mountType === 'local' ? undefined : this.mountType,
 				watcherDebounceMs: this.watcherDebounceMs,
 				watcherUsePolling: this.watcherUsePolling || undefined,
@@ -1332,8 +1691,14 @@ export class MountManagerModal extends Modal {
 	}
 
 	onClose(): void {
+		if (this._closeDropdownHandler) {
+			document.removeEventListener('click', this._closeDropdownHandler, true);
+			this._closeDropdownHandler = undefined;
+		}
 		this.contentEl.empty();
 	}
+
+	private _closeDropdownHandler?: (e: MouseEvent) => void;
 }
 
 // ---------------------------------------------------------------------------

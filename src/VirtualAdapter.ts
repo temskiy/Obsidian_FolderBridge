@@ -6,9 +6,10 @@ import { WebDAVAdapter } from './WebDAVAdapter';
 import { S3Adapter } from './S3Adapter';
 import { SFTPAdapter } from './SFTPAdapter';
 import { FileServer, STREAMING_MIME } from './FileServer';
-import { logger } from './logger';
+import { logger, setDebugLogging } from './logger';
 import { isVisibleFileInMount } from './mountFileFilter';
 import { loadOptionalNodeModule } from './runtimeNode';
+import { i18n } from './i18n';
 import {
 	realPathToResourceUrl,
 	tryReadAsDataUri,
@@ -53,6 +54,9 @@ export class VirtualAdapter {
 	private sftpAdapters: Map<string, SFTPAdapter> = new Map();
 	/** Max bytes for data: URI generation; configurable via plugin settings. */
 	private maxDataUriBytes: number;
+	private vaultPriority: number = 1000;
+	private conflictResolution: 'folders-win' | 'files-win' = 'folders-win';
+	private enableMountMerging: boolean = false;
 	/** Mount IDs that have already shown a read-only notice this session (one-time per mount). */
 	private readOnlyNoticedMounts: Set<string> = new Set();
 	/** Optional localhost HTTP server for streaming video/audio from local mounts. */
@@ -154,6 +158,16 @@ export class VirtualAdapter {
 
 	/** Update the data: URI size cap without reloading the plugin. */
 	setMaxDataUri(bytes: number): void { this.maxDataUriBytes = bytes; }
+	/** Update the vault priority without reloading the plugin. */
+	setVaultPriority(val: number): void { this.vaultPriority = val; }
+	/** Update the conflict resolution rule without reloading the plugin. */
+	setConflictResolution(val: 'folders-win' | 'files-win'): void { this.conflictResolution = val; }
+
+	/** Update mount merging toggle without reloading the plugin. */
+	setEnableMountMerging(val: boolean): void { this.enableMountMerging = val; }
+
+	/** Update debug logging without reloading the plugin. */
+	setDebugLogging(val: boolean): void { setDebugLogging(val); }
 
 	/**
 	 * Clear the one-shot read-only notice record for a mount.
@@ -173,7 +187,7 @@ export class VirtualAdapter {
 		if (!this.readOnlyNoticedMounts.has(mount.id)) {
 			this.readOnlyNoticedMounts.add(mount.id);
 			new Notice(
-				`Folder Bridge: "${mount.virtualPath}" is read-only — this change was not saved.`,
+				i18n.t('notice.readOnly', { path: mount.virtualPath }),
 				6000
 			);
 		}
@@ -245,8 +259,115 @@ export class VirtualAdapter {
 	}
 
 	/** True for mount types whose paths are not local filesystem paths (no allowlist check). */
-	private static isCloudMount(mount: MountPoint): boolean {
+	static isCloudMount(mount: MountPoint): boolean {
 		return mount.mountType === 's3' || mount.mountType === 'sftp' || mount.mountType === 'webdav';
+	}
+
+	/**
+	 * Returns the mount that actually owns the file at the given virtual path,
+	 * using the same priority-based conflict resolution as stat().
+	 *
+	 * Collects all mounts that have the file, checks vault too, then resolves
+	 * conflicts using priority → conflictResolution → alphabetical realPath.
+	 * Returns the winning mount or undefined if the vault wins.
+	 *
+	 * For cloud mounts (WebDAV/S3/SFTP) this falls back to path-based lookup
+	 * since synchronous existence checks are not available from the explorer.
+	 */
+	getEffectiveMountForExplorer(normalizedPath: string): MountPoint | undefined {
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		if (mounts.length === 0) return undefined;
+
+		// Collect candidates: mounts that have this file
+		type Candidate = {
+			mount: MountPoint;
+			priority: number;
+			realPath: string;
+		};
+		const candidates: Candidate[] = [];
+
+		for (const mount of mounts) {
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+
+			const mountPriority = mount.priority ?? 0;
+			let hasFile = false;
+			let realPath = '';
+
+			try {
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					// Cloud mount — trust path-based lookup
+					hasFile = true;
+					realPath = this.toServerPath(normalizedPath, mount);
+				} else {
+					const s3 = this.getS3(mount);
+					if (s3) {
+						hasFile = true;
+						realPath = this.toServerPath(normalizedPath, mount);
+					} else {
+						const sftp = this.getSFTP(mount);
+						if (sftp) {
+							hasFile = true;
+							realPath = this.toServerPath(normalizedPath, mount);
+						} else {
+							// Local mount — check real existence
+							const rp = this.toReal(normalizedPath, mount);
+							try {
+								if (fs.existsSync(rp)) {
+									hasFile = true;
+									realPath = rp;
+								}
+							} catch { /* ENOENT */ }
+						}
+					}
+				}
+			} catch {
+				// mount doesn't have this file or access denied
+			}
+
+			if (hasFile) {
+				candidates.push({ mount, priority: mountPriority, realPath });
+			}
+		}
+
+		if (candidates.length === 0) return undefined;
+
+		// Check the vault for this path
+		const vaultPath = normalizedPath;
+		const vaultExists = (() => {
+			try {
+				const fullPath = (this.orig() as DataAdapter & { getFullPath?: (p: string) => string }).getFullPath?.(vaultPath) ?? vaultPath;
+				return fs.existsSync(fullPath);
+			} catch {
+				return false;
+			}
+		})();
+
+		if (vaultExists) {
+			// Add vault as candidate with vaultPriority
+			candidates.push({
+				mount: { priority: this.vaultPriority } as unknown as MountPoint,
+				priority: this.vaultPriority,
+				realPath: '',
+			});
+		}
+
+		// Resolve conflicts among ALL candidates (vault + mounts)
+		const conflictCandidates = candidates.map(c => ({
+			path: normalizedPath,
+			type: 'file' as const,
+			priority: c.priority,
+			realPath: c.realPath,
+		}));
+		const winner = this.pathMapper.resolveConflict(conflictCandidates, this.conflictResolution);
+		if (!winner) return undefined;
+
+		// If winner is the vault (realPath === ''), return undefined
+		if (winner.realPath === '') return undefined;
+
+		// Find the winning mount
+		const winningCandidate = candidates.find(c => c.realPath === winner.realPath);
+		return winningCandidate?.mount;
 	}
 
 	/**
@@ -289,6 +410,16 @@ export class VirtualAdapter {
 		}
 	}
 
+	/**
+	 * True if the path belongs to Obsidian's internal `.obsidian/` directory.
+	 * These files must always be routed to the original adapter — they are
+	 * plugin configs, vault settings, etc. and must never be resolved through
+	 * virtual mounts.
+	 */
+	private isVaultInternalPath(normalizedPath: string): boolean {
+		return normalizedPath === '.obsidian' || normalizedPath.startsWith('.obsidian/');
+	}
+
 	// ------------------------------------------------------------------
 	// getName
 	// ------------------------------------------------------------------
@@ -319,7 +450,19 @@ export class VirtualAdapter {
 	getFullPath(normalizedPath: string): string {
 		const mount = this.pathMapper.getMountForPath(normalizedPath);
 		if (mount && !VirtualAdapter.isCloudMount(mount)) {
-			return this.pathMapper.toRealPath(normalizedPath, mount);
+			const realPath = this.pathMapper.toRealPath(normalizedPath, mount);
+			// [BUGFIX] Check if file actually exists in mount before returning mount path.
+			// When a root mount (virtualPath === "") covers all paths, files from the
+			// primary vault would incorrectly resolve to the mount's real path where
+			// they don't exist, breaking images and other embedded resources.
+			try {
+				if (fs.existsSync(realPath)) {
+					return realPath;
+				}
+				logger.debug(`[FolderBridge] getFullPath() file not in mount, fallback: "${normalizedPath}"`);
+			} catch {
+				// If we can't check, fall through to original adapter
+			}
 		}
 		return (this.orig() as DataAdapter & { getFullPath?(path: string): string }).getFullPath?.(normalizedPath) ?? normalizedPath;
 	}
@@ -329,9 +472,15 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async exists(normalizedPath: string, sensitive?: boolean): Promise<boolean> {
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge EXISTS] path="${normalizedPath}" → delegating to original adapter (internal path)`);
+			return this.orig().exists(normalizedPath, sensitive);
+		}
+
 		const mount = this.pathMapper.getMountForPath(normalizedPath);
 		if (mount) {
-			return (await this.stat(normalizedPath)) !== null;
+			const statResult = await this.stat(normalizedPath);
+			return statResult !== null;
 		}
 
 		// A path may not physically exist in the vault yet but still needs to
@@ -350,118 +499,434 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async stat(normalizedPath: string): Promise<{ type: 'file' | 'folder'; ctime: number; mtime: number; size: number } | null> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (this.isPathIgnored(normalizedPath, mount)) return null;
-			const webdav = this.getWebDAV(mount);
-			if (webdav) {
-				const stat = await webdav.stat(this.toServerPath(normalizedPath, mount));
-				if (stat?.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount)) return null;
-				return stat;
-			}
-			const s3 = this.getS3(mount);
-			if (s3) {
-				const stat = await s3.stat(this.toServerPath(normalizedPath, mount));
-				if (stat?.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount)) return null;
-				return stat;
-			}
-			const sftp = this.getSFTP(mount);
-			if (sftp) {
-				const stat = await sftp.stat(this.toServerPath(normalizedPath, mount));
-				if (stat?.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount)) return null;
-				return stat;
-			}
-			const realPath = this.toReal(normalizedPath, mount);
-			try {
-				const s = await fs.promises.stat(realPath);
-				if (s.isFile() && !this.isVisibleMountFile(normalizedPath, mount)) return null;
-				return {
-					type: s.isDirectory() ? 'folder' : 'file',
-					ctime: s.ctimeMs,
-					mtime: s.mtimeMs,
-					size: s.size,
-				};
-			} catch (e) {
-				// Obsidian expects null for missing files, not an error
-				if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-					logger.debug(`[FolderBridge] stat failed for "${realPath}":`, e);
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge STAT] path="${normalizedPath}" → delegating to original adapter (internal path)`);
+			return this.orig().stat(normalizedPath);
+		}
+
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					const s = await webdav.stat(this.toServerPath(normalizedPath, mount));
+					if (s && !(s.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount))) return s;
+				} else {
+					const s3 = this.getS3(mount);
+					if (s3) {
+						const s = await s3.stat(this.toServerPath(normalizedPath, mount));
+						if (s && !(s.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount))) return s;
+					} else {
+						const sftp = this.getSFTP(mount);
+						if (sftp) {
+							const s = await sftp.stat(this.toServerPath(normalizedPath, mount));
+							if (s && !(s.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount))) return s;
+						} else {
+							const realPath = this.toReal(normalizedPath, mount);
+							this.assertAllowed(realPath);
+							try {
+								const s = await fs.promises.stat(realPath);
+								if (!(s.isFile() && !this.isVisibleMountFile(normalizedPath, mount))) {
+									return { type: s.isDirectory() ? 'folder' : 'file', ctime: s.ctimeMs, mtime: s.mtimeMs, size: s.size };
+								}
+							} catch { /* ENOENT */ }
+						}
+					}
 				}
 				return null;
 			}
+			return this.orig().stat(normalizedPath);
 		}
 
-		// Virtual intermediate directory: a path that doesn't exist on disk but
-		// is a parent of a mount (e.g. "Projects" when the mount is "Projects/Work").
-		// Obsidian calls stat() on paths it knows exist (from exists()), so we must
-		// return a synthetic folder stat rather than null.
+		// Get ALL mounts covering this path (for priority-based conflict resolution)
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+
+		// Fast path: if no mounts cover this path, delegate to original vault
+		if (mounts.length === 0) {
+			if (this.pathMapper.hasMountsUnder(normalizedPath)) {
+				const real = await this.orig().stat(normalizedPath);
+				if (real) return real;
+				return { type: 'folder', ctime: 0, mtime: Date.now(), size: 0 };
+			}
+			return this.orig().stat(normalizedPath);
+		}
+
+		// Collect stat candidates from all mounts
+		type StatCandidate = {
+			stat: { type: 'file' | 'folder'; ctime: number; mtime: number; size: number };
+			priority: number;
+			realPath: string;
+		};
+		const candidates: StatCandidate[] = [];
+
+		for (const mount of mounts) {
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+
+			const mountPriority = mount.priority ?? 0;
+			let statResult: { type: 'file' | 'folder'; ctime: number; mtime: number; size: number } | null = null;
+			let realPath = '';
+
+			try {
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					const s = await webdav.stat(this.toServerPath(normalizedPath, mount));
+					if (s && !(s.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount))) {
+						statResult = s;
+						realPath = this.toServerPath(normalizedPath, mount);
+					}
+				} else {
+					const s3 = this.getS3(mount);
+					if (s3) {
+						const s = await s3.stat(this.toServerPath(normalizedPath, mount));
+						if (s && !(s.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount))) {
+							statResult = s;
+							realPath = this.toServerPath(normalizedPath, mount);
+						}
+					} else {
+						const sftp = this.getSFTP(mount);
+						if (sftp) {
+							const s = await sftp.stat(this.toServerPath(normalizedPath, mount));
+							if (s && !(s.type === 'file' && !this.isVisibleMountFile(normalizedPath, mount))) {
+								statResult = s;
+								realPath = this.toServerPath(normalizedPath, mount);
+							}
+						} else {
+							// Local mount
+							const rp = this.toReal(normalizedPath, mount);
+							try {
+								const s = await fs.promises.stat(rp);
+								if (!(s.isFile() && !this.isVisibleMountFile(normalizedPath, mount))) {
+									statResult = {
+										type: s.isDirectory() ? 'folder' : 'file',
+										ctime: s.ctimeMs,
+										mtime: s.mtimeMs,
+										size: s.size,
+									};
+									realPath = rp;
+								}
+							} catch (e) {
+								// ENOENT is expected — file not in mount
+							}
+						}
+					}
+				}
+			} catch {
+				// mount doesn't have this file or access denied
+			}
+
+			if (statResult) {
+				candidates.push({ stat: statResult, priority: mountPriority, realPath });
+			}
+		}
+
+		// Check the vault for this path and add as candidate with vaultPriority
+		const vaultStat = await this.orig().stat(normalizedPath);
+		if (vaultStat) {
+			candidates.push({
+				stat: vaultStat,
+				priority: this.vaultPriority,
+				realPath: '',
+			});
+		}
+
+		// Resolve conflicts among ALL candidates (vault + mounts)
+		if (candidates.length > 0) {
+			const conflictCandidates = candidates.map(c => ({
+				path: normalizedPath,
+				type: c.stat.type,
+				priority: c.priority,
+				realPath: c.realPath,
+			}));
+			const winner = this.pathMapper.resolveConflict(conflictCandidates, this.conflictResolution);
+			if (winner) {
+				const winningCandidate = candidates.find(c => c.realPath === winner.realPath);
+				if (winningCandidate) {
+					return winningCandidate.stat;
+				}
+			}
+		}
+
+		// No candidates at all — try original vault as final fallback
 		if (this.pathMapper.hasMountsUnder(normalizedPath)) {
-			const real = await this.orig().stat(normalizedPath);
-			if (real) return real;
 			return { type: 'folder', ctime: 0, mtime: Date.now(), size: 0 };
 		}
 
 		return this.orig().stat(normalizedPath);
 	}
 
-	// ------------------------------------------------------------------
+	/**
+	 * Resolves which source (mount or vault) actually contains the file at the given path.
+	 * Uses the same priority-based conflict resolution as stat().
+	 * Returns { source: 'vault', realPath } or { source: MountPoint, realPath }.
+	 */
+	private async resolveDeleteSource(normalizedPath: string): Promise<{ source: 'vault'; realPath: string } | { source: MountPoint; realPath: string }> {
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+
+		// Collect candidates from all mounts
+		type DeleteCandidate = {
+			exists: boolean;
+			mount?: MountPoint;
+			realPath: string;
+		};
+		const candidates: DeleteCandidate[] = [];
+
+		for (const mount of mounts) {
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+
+			let exists = false;
+			let realPath = '';
+
+			try {
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					exists = await webdav.exists(this.toServerPath(normalizedPath, mount));
+					realPath = this.toServerPath(normalizedPath, mount);
+				} else {
+					const s3 = this.getS3(mount);
+					if (s3) {
+						exists = await s3.exists(this.toServerPath(normalizedPath, mount));
+						realPath = this.toServerPath(normalizedPath, mount);
+					} else {
+						const sftp = this.getSFTP(mount);
+						if (sftp) {
+							exists = await sftp.exists(this.toServerPath(normalizedPath, mount));
+							realPath = this.toServerPath(normalizedPath, mount);
+						} else {
+							// Local mount
+							const rp = this.toReal(normalizedPath, mount);
+							try {
+								await fs.promises.access(rp, fs.constants.F_OK);
+								exists = true;
+								realPath = rp;
+							} catch {
+								// ENOENT — file not in mount
+							}
+						}
+					}
+				}
+			} catch {
+				// mount doesn't have this file or access denied
+			}
+
+			if (exists) {
+				candidates.push({ exists: true, mount, realPath });
+			}
+		}
+
+		// Check the vault for this path
+		const vaultExists = await this.orig().exists(normalizedPath);
+		if (vaultExists) {
+			const vaultAdapter = this.orig() as DataAdapter & { getFullPath?: (path: string) => string };
+			const vaultRealPath = vaultAdapter.getFullPath?.(normalizedPath) ?? normalizedPath;
+			candidates.push({ exists: true, realPath: vaultRealPath });
+		}
+
+		// If we have candidates, use priority-based resolution
+		if (candidates.length > 0) {
+			// If only one candidate, use it
+			if (candidates.length === 1) {
+				const c = candidates[0];
+				if (c.mount) {
+					return { source: c.mount, realPath: c.realPath };
+				}
+				return { source: 'vault', realPath: c.realPath };
+			}
+
+			// Multiple candidates — resolve by priority
+			// Add vault as a candidate with vaultPriority
+			const conflictCandidates = candidates.map(c => ({
+				path: normalizedPath,
+				type: 'file' as const,
+				priority: c.mount ? (c.mount.priority ?? 0) : this.vaultPriority,
+				realPath: c.realPath,
+			}));
+
+			const winner = this.pathMapper.resolveConflict(conflictCandidates, this.conflictResolution);
+			if (winner) {
+				const winningCandidate = candidates.find(c => c.realPath === winner.realPath);
+				if (winningCandidate) {
+					if (winningCandidate.mount) {
+						return { source: winningCandidate.mount, realPath: winningCandidate.realPath };
+					}
+					return { source: 'vault', realPath: winningCandidate.realPath };
+				}
+			}
+
+			// Fallback: use the first candidate (highest priority mount or vault)
+			const fallback = candidates[0];
+			if (fallback.mount) {
+				return { source: fallback.mount, realPath: fallback.realPath };
+			}
+			return { source: 'vault', realPath: fallback.realPath };
+		}
+
+		// No candidates found — try original vault as final fallback
+		const vaultAdapter = this.orig() as DataAdapter & { getFullPath?: (path: string) => string };
+		const vaultRealPath = vaultAdapter.getFullPath?.(normalizedPath) ?? normalizedPath;
+		return { source: 'vault', realPath: vaultRealPath };
+	}
+
 	// list
 	// ------------------------------------------------------------------
 
 	async list(normalizedPath: string): Promise<{ files: string[]; folders: string[] }> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			logger.debug(`[FolderBridge] list: found mount for "${normalizedPath}"`);
-			if (this.isPathIgnored(normalizedPath, mount)) {
-				logger.debug(`[FolderBridge] list: path is ignored, returning empty`);
-				return { files: [], folders: [] };
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				let mountResult: { files: string[]; folders: string[] } = { files: [], folders: [] };
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					mountResult = await webdav.list(this.toServerPath(normalizedPath, mount), normalizedPath, mount);
+				} else {
+					const s3 = this.getS3(mount);
+					if (s3) {
+						mountResult = await s3.list(this.toServerPath(normalizedPath, mount), normalizedPath, mount);
+					} else {
+						const sftp = this.getSFTP(mount);
+						if (sftp) {
+							mountResult = await sftp.list(this.toServerPath(normalizedPath, mount), normalizedPath, mount);
+						} else {
+							const realPath = this.toReal(normalizedPath, mount);
+							try {
+								mountResult = await this.listRealDirectory(realPath, normalizedPath, mount);
+							} catch { /* directory not accessible */ }
+						}
+					}
+				}
+				// Inject virtual intermediate folders for deeper mounts
+				const virtualChildren = this.pathMapper.getVirtualMountsDirectChildren(normalizedPath);
+				for (const child of virtualChildren) {
+					if (!mountResult.folders.includes(child)) {
+						mountResult.folders.push(child);
+					}
+				}
+				return mountResult;
 			}
-			const webdav = this.getWebDAV(mount);
-			if (webdav) {
-				const sp = this.toServerPath(normalizedPath, mount);
-				const result = await webdav.list(sp, normalizedPath, mount);
-				return {
-					folders: result.folders,
-					files: result.files.filter(file => this.isVisibleMountFile(file, mount)),
-				};
-			}
-			const s3 = this.getS3(mount);
-			if (s3) {
-				const sp = this.toServerPath(normalizedPath, mount);
-				const result = await s3.list(sp, normalizedPath, mount);
-				return {
-					folders: result.folders,
-					files: result.files.filter(file => this.isVisibleMountFile(file, mount)),
-				};
-			}
-			const sftp = this.getSFTP(mount);
-			if (sftp) {
-				const sp = this.toServerPath(normalizedPath, mount);
-				const result = await sftp.list(sp, normalizedPath, mount);
-				return {
-					folders: result.folders,
-					files: result.files.filter(file => this.isVisibleMountFile(file, mount)),
-				};
-			}
-			const realPath = this.toReal(normalizedPath, mount);
-			logger.debug(`[FolderBridge] list: resolved to real path "${realPath}"`);
+			let result: { files: string[]; folders: string[] };
 			try {
-				return await this.listRealDirectory(realPath, normalizedPath, mount);
-			} catch (e) {
-				logger.error(`[FolderBridge] list failed for mount "${mount.virtualPath}":`, e);
-				// Return empty instead of throwing to avoid breaking the UI
-				return { files: [], folders: [] };
+				result = await this.orig().list(normalizedPath);
+			} catch {
+				result = { files: [], folders: [] };
 			}
+			return result;
 		}
 
-		// Merge real vault listing with injected virtual mount folders
+		// [MERGE] Always get the base listing from the original vault adapter first,
+		// so that files from the main vault are not hidden when a mount overlaps.
 		let result: { files: string[]; folders: string[] };
 		try {
 			result = await this.orig().list(normalizedPath);
 		} catch {
-			// Path may only exist as a virtual parent of a mount
 			result = { files: [], folders: [] };
 		}
 
+		// Get ALL mounts covering this path (for priority-based conflict resolution)
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		if (mounts.length > 0) {
+			// Collect candidates for each name from all mounts
+			const fileCandidates = new Map<string, Array<{path: string, type: 'file', priority: number, realPath: string}>>();
+			const folderCandidates = new Map<string, Array<{path: string, type: 'folder', priority: number, realPath: string}>>();
+
+			// Add vault files/folders as candidates with vaultPriority
+			const vaultPriority = this.vaultPriority;
+			for (const file of result.files) {
+				const name = file.split('/').pop() || file;
+				if (!fileCandidates.has(name)) fileCandidates.set(name, []);
+				fileCandidates.get(name)!.push({
+					path: file,
+					type: 'file',
+					priority: vaultPriority,
+					realPath: '', // vault files don't have a real path
+				});
+			}
+			for (const folder of result.folders) {
+				const name = folder.split('/').pop() || folder;
+				if (!folderCandidates.has(name)) folderCandidates.set(name, []);
+				folderCandidates.get(name)!.push({
+					path: folder,
+					type: 'folder',
+					priority: vaultPriority,
+					realPath: '',
+				});
+			}
+
+			// For each mount, collect its contents as candidates
+			for (const mount of mounts) {
+				if (this.isPathIgnored(normalizedPath, mount)) continue;
+				const mountPriority = mount.priority ?? 0;
+
+				let mountResult: { files: string[]; folders: string[] } = { files: [], folders: [] };
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					const sp = this.toServerPath(normalizedPath, mount);
+					mountResult = await webdav.list(sp, normalizedPath, mount);
+				} else {
+					const s3 = this.getS3(mount);
+					if (s3) {
+						const sp = this.toServerPath(normalizedPath, mount);
+						mountResult = await s3.list(sp, normalizedPath, mount);
+					} else {
+						const sftp = this.getSFTP(mount);
+						if (sftp) {
+							const sp = this.toServerPath(normalizedPath, mount);
+							mountResult = await sftp.list(sp, normalizedPath, mount);
+						} else {
+							const realPath = this.toReal(normalizedPath, mount);
+							try {
+								mountResult = await this.listRealDirectory(realPath, normalizedPath, mount);
+							} catch {
+								// mount directory not accessible
+							}
+						}
+					}
+				}
+
+				// Add mount files as candidates
+				for (const file of mountResult.files) {
+					if (!this.isVisibleMountFile(file, mount)) continue;
+					const name = file.split('/').pop() || file;
+					if (!fileCandidates.has(name)) fileCandidates.set(name, []);
+					fileCandidates.get(name)!.push({
+						path: file,
+						type: 'file',
+						priority: mountPriority,
+						realPath: this.toReal(file, mount),
+					});
+				}
+
+				// Add mount folders as candidates
+				for (const folder of mountResult.folders) {
+					const name = folder.split('/').pop() || folder;
+					if (!folderCandidates.has(name)) folderCandidates.set(name, []);
+					folderCandidates.get(name)!.push({
+						path: folder,
+						type: 'folder',
+						priority: mountPriority,
+						realPath: this.toReal(folder, mount),
+					});
+				}
+			}
+
+			// Resolve conflicts for each name
+			const resolvedFiles: string[] = [];
+			const resolvedFolders: string[] = [];
+
+			for (const [, candidates] of fileCandidates) {
+				const winner = this.pathMapper.resolveConflict(candidates, this.conflictResolution);
+				if (winner) resolvedFiles.push(winner.path);
+			}
+
+			for (const [, candidates] of folderCandidates) {
+				const winner = this.pathMapper.resolveConflict(candidates, this.conflictResolution);
+				if (winner) resolvedFolders.push(winner.path);
+			}
+
+			result = { files: resolvedFiles, folders: resolvedFolders };
+		}
+
+		// Inject virtual intermediate folders for deeper mounts
 		const virtualChildren = this.pathMapper.getVirtualMountsDirectChildren(normalizedPath);
 		for (const child of virtualChildren) {
 			if (!result.folders.includes(child)) {
@@ -471,7 +936,6 @@ export class VirtualAdapter {
 
 		return result;
 	}
-
 	private async listRealDirectory(
 		realDirPath: string,
 		virtualParentPath: string,
@@ -490,7 +954,14 @@ export class VirtualAdapter {
 		let entries: import('fs').Dirent[];
 		try {
 			entries = await fs.promises.readdir(realDirPath, { withFileTypes: true });
-		} catch (e) {
+		} catch (e: any) {
+			// [CLEANUP] Ожидаемо для слоёных хранилищ: папка есть в основном хранилище,
+			// но физически отсутствует в этом конкретном маунте.
+			if (e?.code === 'ENOENT' || String(e).includes('ENOENT')) {
+				logger.debug(`[FolderBridge] Directory not found in mount (expected in layered vaults): "${realDirPath}"`);
+				return { files: [], folders: [] };
+			}
+			// Реальные ошибки (например, отказ в доступе) по-прежнему логируются как error.
 			const msg = translateFsError(e as NodeJS.ErrnoException, 'list');
 			logger.error(`[FolderBridge] Failed to list directory "${realDirPath}":`, msg);
 			throw new Error(`Folder Bridge: Cannot list "${realDirPath}": ${msg}`);
@@ -523,11 +994,10 @@ export class VirtualAdapter {
 			} else if (entry.isSymbolicLink()) {
 				// For very large directories, skip symlink resolution to avoid delay
 				if (entries.length > 1000) {
-					logger.debug(`[FolderBridge] Skipping symlink resolution in large directory (${entries.length} items)`);
 					// Assume it's a file (safer default)
 					if (this.isVisibleMountFile(virtualChild, mount)) files.push(virtualChild);
 				} else {
-					// Resolve symlinks to determine actual type
+					// Resolve symlinks to determine actual type using fs.promises.stat directly
 					try {
 						const s = await fs.promises.stat(path.join(realDirPath, entry.name));
 						if (s.isDirectory()) {
@@ -542,7 +1012,6 @@ export class VirtualAdapter {
 			}
 		}
 
-		logger.debug(`[FolderBridge] listRealDirectory: returning ${folders.length} folders and ${files.length} files`);
 		return { files, folders };
 	}
 
@@ -551,47 +1020,146 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async read(normalizedPath: string): Promise<string> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot read ignored path "${normalizedPath}"`);
-			this.assertVisibleMountFile(normalizedPath, mount);
-			const webdav = this.getWebDAV(mount);
-			if (webdav) return await webdav.readText(this.toServerPath(normalizedPath, mount));
-			const s3 = this.getS3(mount);
-			if (s3) return await s3.readText(this.toServerPath(normalizedPath, mount));
-			const sftp = this.getSFTP(mount);
-			if (sftp) return await sftp.readText(this.toServerPath(normalizedPath, mount));
-			const realPath = this.toReal(normalizedPath, mount);
-			this.assertAllowed(realPath);
-			try {
+		logger.debug(`[FolderBridge READ] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)} hasMounts=${this.pathMapper.getMountsForPath(normalizedPath).length > 0}`);
+
+		// Always delegate Obsidian's internal files to the original adapter.
+		// These include plugin configs (.obsidian/plugins/*/data.json), vault
+		// settings, community plugins cache, etc.  Routing them through mounts
+		// breaks other plugins that read their own config files.
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge READ] → delegating to original adapter (internal path)`);
+			return this.orig().read(normalizedPath);
+		}
+
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot read ignored path "${normalizedPath}"`);
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) return await webdav.readText(this.toServerPath(normalizedPath, mount));
+				const s3 = this.getS3(mount);
+				if (s3) return await s3.readText(this.toServerPath(normalizedPath, mount));
+				const sftp = this.getSFTP(mount);
+				if (sftp) return await sftp.readText(this.toServerPath(normalizedPath, mount));
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
 				return await fs.promises.readFile(realPath, 'utf8');
-			} catch (e) {
-				logger.error(`[FolderBridge] read failed for "${realPath}":`, e);
-				if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
-					// Check whether the file is an online-only cloud placeholder
-					// (e.g. OneDrive Files On Demand) before surfacing a raw ENOENT.
-					if (await isCloudPlaceholder(realPath)) {
-						throw new Error(
-							`Folder Bridge: "${path.basename(realPath)}" is a cloud-only placeholder ` +
-							`(OneDrive / SharePoint Files On Demand) and cannot be read while offline. ` +
-							`Right-click the file and choose "Always keep on this device" to make it available locally.`
-						);
-					}
-					// Genuinely missing — preserve ENOENT so Obsidian handles it normally
-					const err = new Error(`ENOENT: no such file or directory, open '${realPath}'`);
-					(err as NodeJS.ErrnoException).code = 'ENOENT';
-					throw err;
-				}
-				throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'read')}`);
+			}
+			return this.orig().read(normalizedPath);
+		}
+
+		// Collect candidates: vault + all covering mounts
+		type ReadCandidate = { priority: number; readFn: () => Promise<string> };
+		const candidates: ReadCandidate[] = [];
+
+		// Try vault first
+		try {
+			const vaultContent = await this.orig().read(normalizedPath);
+			candidates.push({ priority: this.vaultPriority, readFn: async () => vaultContent });
+		} catch {
+			// vault doesn't have this file — skip
+		}
+
+		// Try mounts — but only if the file actually exists in the mount
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		for (const mount of mounts) {
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+			const mountPriority = mount.priority ?? 0;
+			try {
+				this.assertVisibleMountFile(normalizedPath, mount);
+				// Quick existence check before trying to read
+				const existsInMount = await this._checkMountFileExists(normalizedPath, mount);
+				if (!existsInMount) continue;
+				const readFn = async () => {
+					const webdav = this.getWebDAV(mount);
+					if (webdav) return await webdav.readText(this.toServerPath(normalizedPath, mount));
+					const s3 = this.getS3(mount);
+					if (s3) return await s3.readText(this.toServerPath(normalizedPath, mount));
+					const sftp = this.getSFTP(mount);
+					if (sftp) return await sftp.readText(this.toServerPath(normalizedPath, mount));
+					const realPath = this.toReal(normalizedPath, mount);
+					this.assertAllowed(realPath);
+					return await fs.promises.readFile(realPath, 'utf8');
+				};
+				candidates.push({ priority: mountPriority, readFn });
+			} catch {
+				// mount doesn't have this file or access denied — skip
 			}
 		}
-		return this.orig().read(normalizedPath);
+
+		if (candidates.length === 0) {
+			throw new Error(`File not found: "${normalizedPath}"`);
+		}
+
+		// Sort by priority descending (highest wins)
+		candidates.sort((a, b) => b.priority - a.priority);
+
+		// Try each candidate in priority order; if readFn throws, try next
+		for (const candidate of candidates) {
+			try {
+				const content = await candidate.readFn();
+				return content;
+			} catch {
+				// try next candidate
+			}
+		}
+
+		throw new Error(`File not found: "${normalizedPath}"`);
+	}
+
+	/** Quick check if a file exists in a specific mount. */
+	private async _checkMountFileExists(normalizedPath: string, mount: MountPoint): Promise<boolean> {
+		try {
+			const webdav = this.getWebDAV(mount);
+			if (webdav) {
+				const s = await webdav.stat(this.toServerPath(normalizedPath, mount));
+				return s !== null;
+			}
+			const s3 = this.getS3(mount);
+			if (s3) {
+				const s = await s3.stat(this.toServerPath(normalizedPath, mount));
+				return s !== null;
+			}
+			const sftp = this.getSFTP(mount);
+			if (sftp) {
+				const s = await sftp.stat(this.toServerPath(normalizedPath, mount));
+				return s !== null;
+			}
+			// Local mount
+			const realPath = this.toReal(normalizedPath, mount);
+			this.assertAllowed(realPath);
+			await fs.promises.access(realPath);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	async cachedRead(normalizedPath: string): Promise<string> {
+		logger.debug(`[FolderBridge CACHED_READ] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)}`);
+
+		// Always delegate Obsidian's internal files to the original adapter.
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge CACHED_READ] → delegating to original adapter (internal path)`);
+			const orig = this.orig() as DataAdapter & { cachedRead?: (path: string) => Promise<string> };
+			if (typeof orig.cachedRead === 'function') {
+				return orig.cachedRead(normalizedPath);
+			}
+			return this.orig().read(normalizedPath);
+		}
+
 		const mount = this.pathMapper.getMountForPath(normalizedPath);
 		if (mount) {
 			return this.read(normalizedPath);
+		}
+		// Check vault priority
+		try {
+			const vaultContent = await this.orig().read(normalizedPath);
+			return vaultContent;
+		} catch {
+			// Fall through
 		}
 		const original = this.orig() as DataAdapter & { cachedRead?: (path: string) => Promise<string> };
 		if (typeof original.cachedRead === 'function') {
@@ -601,39 +1169,91 @@ export class VirtualAdapter {
 	}
 
 	async readBinary(normalizedPath: string): Promise<ArrayBuffer> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot read ignored path "${normalizedPath}"`);
-			this.assertVisibleMountFile(normalizedPath, mount);
-			const webdav = this.getWebDAV(mount);
-			if (webdav) return await webdav.readBinary(this.toServerPath(normalizedPath, mount));
-			const s3 = this.getS3(mount);
-			if (s3) return await s3.readBinary(this.toServerPath(normalizedPath, mount));
-			const sftp = this.getSFTP(mount);
-			if (sftp) return await sftp.readBinary(this.toServerPath(normalizedPath, mount));
-			const realPath = this.toReal(normalizedPath, mount);
-			this.assertAllowed(realPath);
-			try {
+		logger.debug(`[FolderBridge READ_BINARY] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)}`);
+
+		// Always delegate Obsidian's internal files to the original adapter.
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge READ_BINARY] → delegating to original adapter (internal path)`);
+			return this.orig().readBinary(normalizedPath);
+		}
+
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot read ignored path "${normalizedPath}"`);
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) return await webdav.readBinary(this.toServerPath(normalizedPath, mount));
+				const s3 = this.getS3(mount);
+				if (s3) return await s3.readBinary(this.toServerPath(normalizedPath, mount));
+				const sftp = this.getSFTP(mount);
+				if (sftp) return await sftp.readBinary(this.toServerPath(normalizedPath, mount));
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
 				const buf = await fs.promises.readFile(realPath);
-				// Return a proper ArrayBuffer (buf.buffer may be a shared Buffer pool slice)
 				return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-			} catch (e) {
-				if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
-					if (await isCloudPlaceholder(realPath)) {
-						throw new Error(
-							`Folder Bridge: "${path.basename(realPath)}" is a cloud-only placeholder ` +
-							`(OneDrive / SharePoint Files On Demand) and cannot be read while offline. ` +
-							`Right-click the file and choose "Always keep on this device" to make it available locally.`
-						);
-					}
-					const err = new Error(`ENOENT: no such file or directory, open '${realPath}'`);
-					(err as NodeJS.ErrnoException).code = 'ENOENT';
-					throw err;
-				}
-				throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'readBinary')}`);
+			}
+			return this.orig().readBinary(normalizedPath);
+		}
+
+		// Collect candidates: vault + all covering mounts
+		type BinaryCandidate = { priority: number; readFn: () => Promise<ArrayBuffer> };
+		const candidates: BinaryCandidate[] = [];
+
+		// Try vault first
+		try {
+			const vaultBuf = await this.orig().readBinary(normalizedPath);
+			candidates.push({ priority: this.vaultPriority, readFn: async () => vaultBuf });
+		} catch {
+			// vault doesn't have this file — skip
+		}
+
+		// Try mounts — but only if the file actually exists in the mount
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		for (const mount of mounts) {
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+			const mountPriority = mount.priority ?? 0;
+			try {
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const existsInMount = await this._checkMountFileExists(normalizedPath, mount);
+				if (!existsInMount) continue;
+				const readFn = async () => {
+					const webdav = this.getWebDAV(mount);
+					if (webdav) return await webdav.readBinary(this.toServerPath(normalizedPath, mount));
+					const s3 = this.getS3(mount);
+					if (s3) return await s3.readBinary(this.toServerPath(normalizedPath, mount));
+					const sftp = this.getSFTP(mount);
+					if (sftp) return await sftp.readBinary(this.toServerPath(normalizedPath, mount));
+					const realPath = this.toReal(normalizedPath, mount);
+					this.assertAllowed(realPath);
+					const buf = await fs.promises.readFile(realPath);
+					return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+				};
+				candidates.push({ priority: mountPriority, readFn });
+			} catch {
+				// mount doesn't have this file or access denied — skip
 			}
 		}
-		return this.orig().readBinary(normalizedPath);
+
+		if (candidates.length === 0) {
+			throw new Error(`File not found: "${normalizedPath}"`);
+		}
+
+		// Sort by priority descending (highest wins)
+		candidates.sort((a, b) => b.priority - a.priority);
+
+		// Try each candidate in priority order; if readFn throws, try next
+		for (const candidate of candidates) {
+			try {
+				const buf = await candidate.readFn();
+				return buf;
+			} catch {
+				// try next candidate
+			}
+		}
+
+		throw new Error(`File not found: "${normalizedPath}"`);
 	}
 
 	// ------------------------------------------------------------------
@@ -641,154 +1261,452 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async write(normalizedPath: string, data: string, options?: unknown): Promise<void> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot write to ignored path "${normalizedPath}"`);
-			this.assertVisibleMountFile(normalizedPath, mount);
-			const webdav = this.getWebDAV(mount);
-			if (webdav) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] webdav write → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdav.writeText(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const s3 = this.getS3(mount);
-			if (s3) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] s3 write → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3.writeText(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const sftp = this.getSFTP(mount);
-			if (sftp) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] sftp write → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftp.writeText(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const realPath = this.toReal(normalizedPath, mount);
+		logger.debug(`[FolderBridge WRITE] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)} hasMounts=${this.pathMapper.getMountsForPath(normalizedPath).length > 0}`);
 
-			this.assertAllowed(realPath);
-			this.assertNotReserved(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] write → ${realPath}`); return; }
-			try {
+		// Always delegate Obsidian's internal files to the original adapter.
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge WRITE] → delegating to original adapter (internal path)`);
+			await this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
+		}
+
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				if (mount.readOnly) { this.warnReadOnly(mount); return; }
+				if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot write to ignored path "${normalizedPath}"`);
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					if (this.dryRun) { return; }
+					await webdav.writeText(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const s3 = this.getS3(mount);
+				if (s3) {
+					if (this.dryRun) { return; }
+					await s3.writeText(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const sftp = this.getSFTP(mount);
+				if (sftp) {
+					if (this.dryRun) { return; }
+					await sftp.writeText(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				if (this.dryRun) { return; }
 				await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
 				await fs.promises.writeFile(realPath, data, 'utf8');
-				void this.onModify?.(normalizedPath).catch(() => { });
+				void this.onModify?.(normalizedPath).catch(() => {});
 				return;
-			} catch (e) {
-				const errorMsg = `Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'write')}`;
-				logger.error(`[FolderBridge] write failed for "${realPath}":`, e, errorMsg);
-				throw new Error(errorMsg);
 			}
+			await this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
 		}
-		return this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
+
+		// Collect writable candidates: vault + all covering mounts
+		type WriteCandidate = { priority: number; writeFn: () => Promise<void> };
+		const candidates: WriteCandidate[] = [];
+
+		// Try vault first — only if the file actually exists there.
+		// Without this check, a mount-only file would lose to the vault
+		// (higher priority) and Obsidian would attempt to write to a
+		// non-existent local path, triggering ENOENT errors.
+		// CRITICAL: Use fs.promises.stat() instead of this.orig().stat()
+		// because Obsidian's adapter may report cached/in-memory files as
+		// existing even when they don't physically exist on disk.
+		let vaultHasFile = false;
+		try {
+			const vaultBasePath = (this.orig() as { basePath?: string }).basePath
+				?? (this.orig() as { adapter?: { getBasePath?: () => string } }).adapter?.getBasePath?.()
+				?? '';
+			const fullPath = path.join(vaultBasePath, normalizedPath.replace(/\//g, path.sep));
+			await fs.promises.stat(fullPath);
+			vaultHasFile = true;
+		} catch { /* vault doesn't have this file on disk */ }
+
+		if (vaultHasFile) {
+			candidates.push({
+				priority: this.vaultPriority,
+				writeFn: async () => {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] vault write → ${normalizedPath}`); return; }
+					await this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
+					void this.onModify?.(normalizedPath).catch(() => {});
+				}
+			});
+		}
+
+		// Try mounts
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		for (const mount of mounts) {
+			if (mount.readOnly) continue;
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+			const mountPriority = mount.priority ?? 0;
+			const writeFn = async () => {
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] webdav write → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await webdav.writeText(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const s3 = this.getS3(mount);
+				if (s3) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] s3 write → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await s3.writeText(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const sftp = this.getSFTP(mount);
+				if (sftp) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] sftp write → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await sftp.writeText(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] write → ${realPath}`); return; }
+				await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
+				await fs.promises.writeFile(realPath, data, 'utf8');
+				void this.onModify?.(normalizedPath).catch(() => {});
+			};
+			candidates.push({ priority: mountPriority, writeFn });
+		}
+
+		if (candidates.length === 0) {
+			throw new Error(`No writable target for "${normalizedPath}"`);
+		}
+
+		// Sort by priority descending (highest wins)
+		candidates.sort((a, b) => b.priority - a.priority);
+		const winner = candidates[0];
+		logger.debug(`[FolderBridge write] WINNER: priority=${winner.priority}, candidates=${candidates.length}`);
+		await winner.writeFn();
 	}
 
 	async writeBinary(normalizedPath: string, data: ArrayBuffer, options?: unknown): Promise<void> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot write to ignored path "${normalizedPath}"`);
-			this.assertVisibleMountFile(normalizedPath, mount);
-			const webdav = this.getWebDAV(mount);
-			if (webdav) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] webdav writeBinary → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdav.writeBinary(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const s3 = this.getS3(mount);
-			if (s3) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] s3 writeBinary → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3.writeBinary(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const sftp = this.getSFTP(mount);
-			if (sftp) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] sftp writeBinary → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftp.writeBinary(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const realPath = this.toReal(normalizedPath, mount);
-			this.assertAllowed(realPath);
-			this.assertNotReserved(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] writeBinary → ${realPath}`); return; }
-			try {
+		logger.debug(`[FolderBridge WRITE_BINARY] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)}`);
+
+		// Always delegate Obsidian's internal files to the original adapter.
+		if (this.isVaultInternalPath(normalizedPath)) {
+			logger.debug(`[FolderBridge WRITE_BINARY] → delegating to original adapter (internal path)`);
+			await this.orig().writeBinary(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
+		}
+
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				if (mount.readOnly) { this.warnReadOnly(mount); return; }
+				if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot write to ignored path "${normalizedPath}"`);
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					if (this.dryRun) { return; }
+					await webdav.writeBinary(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const s3 = this.getS3(mount);
+				if (s3) {
+					if (this.dryRun) { return; }
+					await s3.writeBinary(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const sftp = this.getSFTP(mount);
+				if (sftp) {
+					if (this.dryRun) { return; }
+					await sftp.writeBinary(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				if (this.dryRun) { return; }
 				await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
 				await fs.promises.writeFile(realPath, Buffer.from(data));
-				void this.onModify?.(normalizedPath).catch(() => { });
+				void this.onModify?.(normalizedPath).catch(() => {});
 				return;
-			} catch (e) {
-				throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'writeBinary')}`);
 			}
+			await this.orig().writeBinary(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
 		}
-		return this.orig().writeBinary(normalizedPath, data, options as DataWriteOptions | undefined);
+
+		type BinaryWriteCandidate = { priority: number; writeFn: () => Promise<void> };
+		const candidates: BinaryWriteCandidate[] = [];
+
+		// Vault is writable, but only add as candidate if file exists there on disk
+		// (use fs.stat to avoid cached/in-memory false positives)
+		let vaultHasFileBW = false;
+		try {
+			const vaultBasePath = (this.orig() as { basePath?: string }).basePath
+				?? (this.orig() as { adapter?: { getBasePath?: () => string } }).adapter?.getBasePath?.()
+				?? '';
+			const fullPath = path.join(vaultBasePath, normalizedPath.replace(/\//g, path.sep));
+			await fs.promises.stat(fullPath);
+			vaultHasFileBW = true;
+		} catch { /* vault doesn't have this file on disk */ }
+
+		if (vaultHasFileBW) {
+			candidates.push({
+				priority: this.vaultPriority,
+				writeFn: async () => {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] vault writeBinary → ${normalizedPath}`); return; }
+					await this.orig().writeBinary(normalizedPath, data, options as DataWriteOptions | undefined);
+					void this.onModify?.(normalizedPath).catch(() => {});
+				}
+			});
+		}
+
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		for (const mount of mounts) {
+			if (mount.readOnly) continue;
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+			const mountPriority = mount.priority ?? 0;
+			const writeFn = async () => {
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] webdav writeBinary → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await webdav.writeBinary(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const s3 = this.getS3(mount);
+				if (s3) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] s3 writeBinary → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await s3.writeBinary(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const sftp = this.getSFTP(mount);
+				if (sftp) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] sftp writeBinary → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await sftp.writeBinary(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] writeBinary → ${realPath}`); return; }
+				await fs.promises.mkdir(path.dirname(realPath), { recursive: true });
+				await fs.promises.writeFile(realPath, Buffer.from(data));
+				void this.onModify?.(normalizedPath).catch(() => {});
+			};
+			candidates.push({ priority: mountPriority, writeFn });
+		}
+
+		if (candidates.length === 0) {
+			throw new Error(`No writable target for "${normalizedPath}"`);
+		}
+
+		candidates.sort((a, b) => b.priority - a.priority);
+		const winner = candidates[0];
+		logger.debug(`[FolderBridge writeBinary] WINNER: priority=${winner.priority}`);
+		await winner.writeFn();
 	}
 
 	async append(normalizedPath: string, data: string, options?: unknown): Promise<void> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot append to ignored path "${normalizedPath}"`);
-			this.assertVisibleMountFile(normalizedPath, mount);
-			const webdav = this.getWebDAV(mount);
-			if (webdav) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] webdav append → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdav.append(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const s3 = this.getS3(mount);
-			if (s3) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] s3 append → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3.append(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const sftp = this.getSFTP(mount);
-			if (sftp) {
-				if (this.dryRun) { logger.debug(`[Folder Bridge DryRun] sftp append → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftp.append(this.toServerPath(normalizedPath, mount), data);
-				void this.onModify?.(normalizedPath).catch(() => { });
-				return;
-			}
-			const realPath = this.toReal(normalizedPath, mount);
-			this.assertAllowed(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] append → ${realPath}`); return; }
-			try {
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				if (mount.readOnly) { this.warnReadOnly(mount); return; }
+				if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot append to ignored path "${normalizedPath}"`);
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					if (this.dryRun) { return; }
+					await webdav.append(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const s3 = this.getS3(mount);
+				if (s3) {
+					if (this.dryRun) { return; }
+					await s3.append(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const sftp = this.getSFTP(mount);
+				if (sftp) {
+					if (this.dryRun) { return; }
+					await sftp.append(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				if (this.dryRun) { return; }
 				await fs.promises.appendFile(realPath, data, 'utf8');
-				void this.onModify?.(normalizedPath).catch(() => { });
+				void this.onModify?.(normalizedPath).catch(() => {});
 				return;
-			} catch (e) {
-				throw new Error(`Folder Bridge: ${translateFsError(e as NodeJS.ErrnoException, 'append')}`);
 			}
+			await this.orig().append(normalizedPath, data, options as DataWriteOptions | undefined);
+			void this.onModify?.(normalizedPath).catch(() => {});
+			return;
 		}
-		return this.orig().append(normalizedPath, data, options as DataWriteOptions | undefined);
+
+		type AppendCandidate = { priority: number; appendFn: () => Promise<void> };
+		const candidates: AppendCandidate[] = [];
+
+		// Vault is appendable, but only if the file exists there on disk
+		// (use fs.stat to avoid cached/in-memory false positives)
+		let vaultHasFileApp = false;
+		try {
+			const vaultBasePath = (this.orig() as { basePath?: string }).basePath
+				?? (this.orig() as { adapter?: { getBasePath?: () => string } }).adapter?.getBasePath?.()
+				?? '';
+			const fullPath = path.join(vaultBasePath, normalizedPath.replace(/\//g, path.sep));
+			await fs.promises.stat(fullPath);
+			vaultHasFileApp = true;
+		} catch { /* vault doesn't have this file on disk */ }
+
+		if (vaultHasFileApp) {
+			candidates.push({
+				priority: this.vaultPriority,
+				appendFn: async () => {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] vault append → ${normalizedPath}`); return; }
+					await this.orig().append(normalizedPath, data, options as DataWriteOptions | undefined);
+					void this.onModify?.(normalizedPath).catch(() => {});
+				}
+			});
+		}
+
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		for (const mount of mounts) {
+			if (mount.readOnly) continue;
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+			const mountPriority = mount.priority ?? 0;
+			const appendFn = async () => {
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const webdav = this.getWebDAV(mount);
+				if (webdav) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] webdav append → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await webdav.append(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const s3 = this.getS3(mount);
+				if (s3) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] s3 append → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await s3.append(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const sftp = this.getSFTP(mount);
+				if (sftp) {
+					if (this.dryRun) { logger.debug(`[FolderBridge DryRun] sftp append → ${this.toServerPath(normalizedPath, mount)}`); return; }
+					await sftp.append(this.toServerPath(normalizedPath, mount), data);
+					void this.onModify?.(normalizedPath).catch(() => {});
+					return;
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] append → ${realPath}`); return; }
+				await fs.promises.appendFile(realPath, data, 'utf8');
+				void this.onModify?.(normalizedPath).catch(() => {});
+			};
+			candidates.push({ priority: mountPriority, appendFn });
+		}
+
+		if (candidates.length === 0) {
+			throw new Error(`No writable target for "${normalizedPath}"`);
+		}
+
+		candidates.sort((a, b) => b.priority - a.priority);
+		const winner = candidates[0];
+		logger.debug(`[FolderBridge append] WINNER: priority=${winner.priority}`);
+		await winner.appendFn();
 	}
 
 	async appendBinary(normalizedPath: string, data: ArrayBuffer, options?: DataWriteOptions): Promise<void> {
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (!mount) return this.orig().appendBinary(normalizedPath, data, options);
-		if (mount.readOnly) { this.warnReadOnly(mount); return; }
-		if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot append to ignored path "${normalizedPath}"`);
-		this.assertVisibleMountFile(normalizedPath, mount);
-		if (mount.mountType === 'webdav' || mount.mountType === 's3' || mount.mountType === 'sftp') {
-			throw new Error(`Folder Bridge: Binary append is not supported for ${mount.mountType} mounts.`);
+		// If mount merging is disabled, use simple mount lookup without priority checks
+		if (!this.enableMountMerging) {
+			const mount = this.pathMapper.getMountForPath(normalizedPath);
+			if (mount) {
+				if (mount.readOnly) { this.warnReadOnly(mount); return; }
+				if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot append to ignored path "${normalizedPath}"`);
+				this.assertVisibleMountFile(normalizedPath, mount);
+				if (mount.mountType === 'webdav' || mount.mountType === 's3' || mount.mountType === 'sftp') {
+					throw new Error(`Folder Bridge: Binary append is not supported for ${mount.mountType} mounts.`);
+				}
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				if (this.dryRun) { return; }
+				await fs.promises.appendFile(realPath, Buffer.from(data));
+				void this.onModify?.(normalizedPath).catch(() => {});
+				return;
+			}
+			const orig = this.orig() as DataAdapter & { appendBinary?: (path: string, data: ArrayBuffer, options?: DataWriteOptions) => Promise<void> };
+			if (typeof orig.appendBinary === 'function') {
+				await orig.appendBinary!(normalizedPath, data, options);
+			}
+			return;
 		}
-		const realPath = this.toReal(normalizedPath, mount);
-		this.assertAllowed(realPath);
-		this.assertNotReserved(realPath);
-		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] appendBinary: ${realPath}`); return; }
-		try {
-			await fs.promises.appendFile(realPath, Buffer.from(data));
-			void this.onModify?.(normalizedPath).catch(() => { });
-		} catch (error) {
-			throw new Error(`Folder Bridge: ${translateFsError(error as NodeJS.ErrnoException, 'appendBinary')}`);
+
+		type AppendBinaryCandidate = { priority: number; appendFn: () => Promise<void> };
+		const candidates: AppendBinaryCandidate[] = [];
+
+		// Vault may support appendBinary
+		const orig = this.orig() as DataAdapter & { appendBinary?: (path: string, data: ArrayBuffer, options?: DataWriteOptions) => Promise<void> };
+		if (typeof orig.appendBinary === 'function') {
+			candidates.push({
+				priority: this.vaultPriority,
+				appendFn: async () => {
+					if (this.dryRun) { return; }
+					await orig.appendBinary!(normalizedPath, data, options);
+					void this.onModify?.(normalizedPath).catch(() => {});
+				}
+			});
 		}
+
+		const mounts = this.pathMapper.getMountsForPath(normalizedPath);
+		for (const mount of mounts) {
+			if (mount.readOnly) continue;
+			if (this.isPathIgnored(normalizedPath, mount)) continue;
+			if (mount.mountType === 'webdav' || mount.mountType === 's3' || mount.mountType === 'sftp') {
+				continue; // binary append not supported for cloud mounts
+			}
+			const mountPriority = mount.priority ?? 0;
+			const appendFn = async () => {
+				this.assertVisibleMountFile(normalizedPath, mount);
+				const realPath = this.toReal(normalizedPath, mount);
+				this.assertAllowed(realPath);
+				this.assertNotReserved(realPath);
+				if (this.dryRun) { return; }
+				await fs.promises.appendFile(realPath, Buffer.from(data));
+				void this.onModify?.(normalizedPath).catch(() => {});
+			};
+			candidates.push({ priority: mountPriority, appendFn });
+		}
+
+		if (candidates.length === 0) {
+			throw new Error(`Folder Bridge: Binary append not supported for this path.`);
+		}
+
+		candidates.sort((a, b) => b.priority - a.priority);
+		const winner = candidates[0];
+		await winner.appendFn();
 	}
 
 	async process(
@@ -946,48 +1864,55 @@ export class VirtualAdapter {
 			if (handled) return true;
 		}
 
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return true; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot trash ignored path "${normalizedPath}"`);
-			const realPath = this.toReal(normalizedPath, mount);
-			const webdavTS = this.getWebDAV(mount);
-			if (webdavTS) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
-				await webdavTS.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
-			const s3TS = this.getS3(mount);
-			if (s3TS) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (s3) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
-				await s3TS.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
-			const sftpTS = this.getSFTP(mount);
-			if (sftpTS) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
-				await sftpTS.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
-			this.assertAllowed(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem → ${realPath}`); return true; }
-			try {
-				const electron = loadOptionalNodeModule<{ shell?: { trashItem(p: string): Promise<string> } }>('electron');
-				const shell = electron?.shell;
-				await shell?.trashItem(realPath);
-				await this.notifyDelete(normalizedPath);
-				return true;
-			} catch {
-				// Fallback: permanent delete
-				await fs.promises.rm(realPath, { recursive: true, force: true });
-				await this.notifyDelete(normalizedPath);
-				return true;
-			}
+		// Resolve which source actually contains the file (priority-based)
+		const deleteSource = await this.resolveDeleteSource(normalizedPath);
+
+		if (deleteSource.source === 'vault') {
+			// Delete from local vault using system trash
+			return this.orig().trashSystem(normalizedPath);
 		}
-		return this.orig().trashSystem(normalizedPath);
+
+		// Delete from mount
+		const mount = deleteSource.source;
+		if (mount.readOnly) { this.warnReadOnly(mount); return true; }
+		if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot trash ignored path "${normalizedPath}"`);
+
+		const webdavTS = this.getWebDAV(mount);
+		if (webdavTS) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
+			await webdavTS.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return true;
+		}
+		const s3TS = this.getS3(mount);
+		if (s3TS) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (s3) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
+			await s3TS.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return true;
+		}
+		const sftpTS = this.getSFTP(mount);
+		if (sftpTS) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return true; }
+			await sftpTS.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return true;
+		}
+		// Local mount — use system trash or fallback to permanent delete
+		this.assertAllowed(deleteSource.realPath);
+		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashSystem → ${deleteSource.realPath}`); return true; }
+		try {
+			const electron = loadOptionalNodeModule<{ shell?: { trashItem(p: string): Promise<string> } }>('electron');
+			const shell = electron?.shell;
+			await shell?.trashItem(deleteSource.realPath);
+			await this.notifyDelete(normalizedPath);
+			return true;
+		} catch {
+			// Fallback: permanent delete
+			await fs.promises.rm(deleteSource.realPath, { recursive: true, force: true });
+			await this.notifyDelete(normalizedPath);
+			return true;
+		}
 	}
 
 	async trashLocal(normalizedPath: string, system?: boolean): Promise<void> {
@@ -997,39 +1922,45 @@ export class VirtualAdapter {
 			if (handled) return;
 		}
 
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot trash ignored path "${normalizedPath}"`);
-			const realPath = this.toReal(normalizedPath, mount);
-			const webdavTL = this.getWebDAV(mount);
-			if (webdavTL) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdavTL.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			const s3TL = this.getS3(mount);
-			if (s3TL) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3TL.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			const sftpTL = this.getSFTP(mount);
-			if (sftpTL) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftpTL.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			this.assertAllowed(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal → ${realPath}`); return; }
-			await fs.promises.rm(realPath, { recursive: true, force: true });
+		// Resolve which source actually contains the file (priority-based)
+		const deleteSource = await this.resolveDeleteSource(normalizedPath);
+
+		if (deleteSource.source === 'vault') {
+			// Delete from local vault
+			return (this.orig().trashLocal as (path: string, system?: boolean) => Promise<void>)(normalizedPath, system);
+		}
+
+		// Delete from mount
+		const mount = deleteSource.source;
+		if (mount.readOnly) { this.warnReadOnly(mount); return; }
+		if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot trash ignored path "${normalizedPath}"`);
+
+		const webdavTL = this.getWebDAV(mount);
+		if (webdavTL) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await webdavTL.remove(this.toServerPath(normalizedPath, mount));
 			await this.notifyDelete(normalizedPath);
 			return;
 		}
-		return (this.orig().trashLocal as (path: string, system?: boolean) => Promise<void>)(normalizedPath, system);
+		const s3TL = this.getS3(mount);
+		if (s3TL) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await s3TL.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return;
+		}
+		const sftpTL = this.getSFTP(mount);
+		if (sftpTL) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await sftpTL.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return;
+		}
+		// Local mount
+		this.assertAllowed(deleteSource.realPath);
+		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] trashLocal → ${deleteSource.realPath}`); return; }
+		await fs.promises.rm(deleteSource.realPath, { recursive: true, force: true });
+		await this.notifyDelete(normalizedPath);
 	}
 
 	async rmdir(normalizedPath: string, recursive: boolean): Promise<void> {
@@ -1039,41 +1970,48 @@ export class VirtualAdapter {
 			if (handled) return;
 		}
 
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot remove ignored path "${normalizedPath}"`);
-			const realPath = this.toReal(normalizedPath, mount);
-			const webdavRD = this.getWebDAV(mount);
-			if (webdavRD) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdavRD.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
+		// Resolve which source actually contains the file (priority-based)
+		const deleteSource = await this.resolveDeleteSource(normalizedPath);
+
+		if (deleteSource.source === 'vault') {
+			// Delete from local vault
+			if (typeof this.orig().rmdir === 'function') {
+				return this.orig().rmdir(normalizedPath, recursive);
 			}
-			const s3RD = this.getS3(mount);
-			if (s3RD) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3RD.removePrefix(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			const sftpRD = this.getSFTP(mount);
-			if (sftpRD) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftpRD.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			this.assertAllowed(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir → ${realPath}`); return; }
-			await fs.promises.rm(realPath, { recursive: true, force: true });
+			return;
+		}
+
+		// Delete from mount
+		const mount = deleteSource.source;
+		if (mount.readOnly) { this.warnReadOnly(mount); return; }
+		if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot remove ignored path "${normalizedPath}"`);
+
+		const webdavRD = this.getWebDAV(mount);
+		if (webdavRD) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await webdavRD.remove(this.toServerPath(normalizedPath, mount));
 			await this.notifyDelete(normalizedPath);
 			return;
 		}
-		if (typeof this.orig().rmdir === 'function') {
-			return this.orig().rmdir(normalizedPath, recursive);
+		const s3RD = this.getS3(mount);
+		if (s3RD) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await s3RD.removePrefix(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return;
 		}
+		const sftpRD = this.getSFTP(mount);
+		if (sftpRD) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await sftpRD.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return;
+		}
+		// Local mount
+		this.assertAllowed(deleteSource.realPath);
+		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rmdir → ${deleteSource.realPath}`); return; }
+		await fs.promises.rm(deleteSource.realPath, { recursive: true, force: true });
+		await this.notifyDelete(normalizedPath);
 	}
 
 	async remove(normalizedPath: string): Promise<void> {
@@ -1083,41 +2021,48 @@ export class VirtualAdapter {
 			if (handled) return;
 		}
 
-		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		if (mount) {
-			if (mount.readOnly) { this.warnReadOnly(mount); return; }
-			if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot remove ignored path "${normalizedPath}"`);
-			const realPath = this.toReal(normalizedPath, mount);
-			const webdavRM = this.getWebDAV(mount);
-			if (webdavRM) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await webdavRM.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
+		// Resolve which source actually contains the file (priority-based)
+		const deleteSource = await this.resolveDeleteSource(normalizedPath);
+
+		if (deleteSource.source === 'vault') {
+			// Delete from local vault
+			if (typeof this.orig().remove === 'function') {
+				return this.orig().remove(normalizedPath);
 			}
-			const s3RM = this.getS3(mount);
-			if (s3RM) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await s3RM.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			const sftpRM = this.getSFTP(mount);
-			if (sftpRM) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
-				await sftpRM.remove(this.toServerPath(normalizedPath, mount));
-				await this.notifyDelete(normalizedPath);
-				return;
-			}
-			this.assertAllowed(realPath);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove → ${realPath}`); return; }
-			await fs.promises.rm(realPath, { recursive: true, force: true });
+			return;
+		}
+
+		// Delete from mount
+		const mount = deleteSource.source;
+		if (mount.readOnly) { this.warnReadOnly(mount); return; }
+		if (this.isPathIgnored(normalizedPath, mount)) throw new Error(`Folder Bridge: Cannot remove ignored path "${normalizedPath}"`);
+
+		const webdavRM = this.getWebDAV(mount);
+		if (webdavRM) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove (webdav) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await webdavRM.remove(this.toServerPath(normalizedPath, mount));
 			await this.notifyDelete(normalizedPath);
 			return;
 		}
-		if (typeof this.orig().remove === 'function') {
-			return this.orig().remove(normalizedPath);
+		const s3RM = this.getS3(mount);
+		if (s3RM) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove (s3) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await s3RM.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return;
 		}
+		const sftpRM = this.getSFTP(mount);
+		if (sftpRM) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove (sftp) → ${this.toServerPath(normalizedPath, mount)}`); return; }
+			await sftpRM.remove(this.toServerPath(normalizedPath, mount));
+			await this.notifyDelete(normalizedPath);
+			return;
+		}
+		// Local mount
+		this.assertAllowed(deleteSource.realPath);
+		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] remove → ${deleteSource.realPath}`); return; }
+		await fs.promises.rm(deleteSource.realPath, { recursive: true, force: true });
+		await this.notifyDelete(normalizedPath);
 	}
 
 	// ------------------------------------------------------------------

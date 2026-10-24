@@ -158,6 +158,25 @@
     padding-bottom: 8px;
 }
 
+.folderbridge-additional {
+    margin-top: 12px;
+    margin-bottom: 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 0 10px;
+}
+
+.folderbridge-additional>summary {
+    cursor: pointer;
+    padding: 8px 0;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.folderbridge-additional>div {
+    padding-bottom: 8px;
+}
+
 .folderbridge-input-flex {
     flex: 1;
     width: 100%;
@@ -239,6 +258,13 @@
 
 .folderbridge-status-warning {
     color: var(--text-warning);
+}
+
+/* ── Priority warning ────────────────────────────────────────────────────── */
+
+.folderbridge-priority-warning {
+    color: var(--text-warning);
+    font-style: italic;
 }
 
 
@@ -380,4 +406,17 @@
 
 .tooltip .folderbridge-tooltip-augmented .folderbridge-tooltip-line:not(:first-child) {
     font-size: var(--font-ui-smaller);
+}
+
+
+/* ── File highlight by mount color ─────────────────────────────── */
+
+.nav-file-title.folderbridge-highlighted {
+    border-left: 3px solid var(--highlight-color);
+    background-color: color-mix(in srgb, var(--highlight-color) 8%, transparent);
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.nav-file-title.folderbridge-highlighted:hover {
+    background-color: color-mix(in srgb, var(--highlight-color) 15%, transparent);
 }

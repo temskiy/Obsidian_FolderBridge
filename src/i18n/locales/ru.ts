@@ -1,0 +1,583 @@
+import { Locale } from '../types';
+
+export const ru: Locale = {
+	// Settings tab section names
+	'settings.extensions': 'Расширенные функции',
+	'settings.ignoreLists': 'Списки игнорируемых',
+	'settings.globalIgnorePatterns.name': 'Глобальные шаблоны игнорирования',
+	'settings.globalIgnorePatterns.desc': 'Шаблоны, применяемые к каждому монтированию. Тот же синтаксис, что и для шаблонов монтирования: простые имена соответствуют любому листу, глобы (*.tmp) соответствуют именам файлов, пути с / соответствуют поддеревьям. Предзаполнены распространенными системными файлами.',
+	'settings.globalIgnorePatterns.placeholder': 'напр. .DS_Store, Thumbs.db, *.tmp, node_modules',
+	'settings.globalIgnorePatterns.add': 'Добавить',
+	'settings.globalIgnorePatterns.empty': 'Нет глобальных шаблонов. Такие файлы, как .DS_Store, видны во всех монтированиях.',
+	'settings.priorityDisabled': 'Разрешение конфликтов на основе приоритетов отключено. Включите «Включить объединение монтирования» выше, чтобы настроить приоритет хранилища, разрешение конфликтов и сортировку списка монтирований.',
+
+	// Per-mount ignore lists
+	'settings.perMountIgnoreLists.name': 'Списки игнорируемых для монтирований',
+	'settings.perMountIgnoreLists.desc': 'Шаблоны, применяемые только к конкретному монтированию.',
+	'settings.perMountIgnoreLists.externalHint': 'Списки игнорируемых доступны для редактирования у монтирований, которыми вы управляете в настройках или через управляемый TOC-файл. Внешние TOC-монтирования задают правила игнорирования в своём исходном файле.',
+	'settings.perMountIgnoreLists.emptyHint': 'Сначала добавьте точку монтирования, чтобы настроить её список игнорируемых.',
+
+	// Select mount dropdown
+	'settings.selectMount.name': 'Выберите монтирование',
+	'settings.selectMount.desc': 'Выберите, список игнорируемых какого монтирования редактировать.',
+
+	// Mount points section
+	'settings.mountPoints': 'Точки монтирования',
+	'settings.mountListSort.name': 'Сортировка списка монтирований',
+	'settings.mountListSort.desc': 'Как сортировать список монтирований ниже. «По умолчанию» сохраняет порядок, заданный перетаскиванием.',
+	'settings.mountListSort.options.default': 'По умолчанию (порядок перетаскивания)',
+	'settings.mountListSort.options.nameAsc': 'Имя (А → Я)',
+	'settings.mountListSort.options.nameDesc': 'Имя (Я → А)',
+	'settings.mountListSort.options.priorityDesc': 'Приоритет (сначала высший)',
+	'settings.mountListSort.options.priorityAsc': 'Приоритет (сначала низший)',
+	'mountRow.priority': 'Приоритет',
+	'mountRow.fallbackPath': 'Резервный путь',
+	'mountRow.managedToc': 'Управляемый TOC-файл',
+	'mountRow.externalConfig': 'Внешний конфигурационный файл',
+	'mountRow.createdOnDevice': 'Создано на устройстве',
+	'mountRow.pathOverride': 'Переопределение пути для этого устройства',
+	'mountRow.usingFallback': 'Используется резервный путь',
+	'mountRow.tags': 'Теги',
+	'mountRow.tooltip.toggle': 'Включить / отключить это монтирование',
+	'mountRow.tooltip.foreignDevice': 'Это монтирование принадлежит другому устройству, его нельзя включить здесь.',
+	'mountRow.tooltip.externalManaged': 'Это монтирование управляется внешним конфигурационным файлом. Измените исходный файл, чтобы изменить его состояние.',
+	'mountRow.tooltip.externalReadOnly': 'Это монтирование управляется внешним конфигурационным файлом. Измените исходный файл, чтобы изменить режим «только чтение».',
+	'mountRow.tooltip.readOnly': 'Только чтение — нажмите, чтобы разрешить запись',
+	'mountRow.tooltip.writable': 'Доступно для записи — нажмите, чтобы сделать только для чтения',
+	'mountRow.notice.externalManaged': '<pluginName>: это монтирование управляется внешним конфигурационным файлом. Измените исходный файл, чтобы изменить его.',
+	'mountRow.notice.foreignDevice': '<pluginName>: нельзя включить монтирование, созданное на другом устройстве.',
+	'mountRow.usePathOnDevice': 'Использовать путь на этом устройстве',
+	'mountRow.usePathOnDevice.tooltip': 'Выберите папку на этом устройстве, которая будет использоваться как путь монтирования',
+	'mountRow.selectRealFolder': 'Выберите реальную папку для этого устройства',
+	'mountRow.notice.pathOverridden': '<pluginName>: путь переопределён для этого устройства.',
+	'mountRow.edit.tooltip': 'Изменить пути, метку или флаг «только чтение» у этого монтирования',
+	'settings.addMount.name': 'Добавить новое монтирование',
+	'settings.addMount.desc': 'Сопоставьте внешнюю папку виртуальному пути внутри вашего хранилища.',
+	'settings.addMount.button': 'Добавить точку монтирования',
+	'button.export': 'Экспорт…',
+	'button.export.tooltip': 'Экспортировать все монтирования в JSON-файл для резервной копии или переноса',
+	'button.import': 'Импорт…',
+	'button.import.tooltip': 'Импортировать монтирования из ранее экспортированного JSON-файла',
+	'import.noMounts': '<pluginName>: в выбранном файле не найдено точек монтирования.',
+	'import.summary': 'Folder Bridge: Импортировано монтирований: {added}.{skipped}',
+	'import.skippedInvalid': ' Пропущено (некорректных): {skipped}.',
+	'import.failed': '<pluginName>: не удалось разобрать выбранный файл. Это действительный экспорт Folder Bridge?',
+	'settings.noMounts': 'Монтирования ещё не настроены. Нажмите «Добавить точку монтирования», чтобы начать.',
+	'settings.priorityWarning': 'Предупреждение: {count} групп монтирований имеют одинаковый приоритет. Когда объекты с одинаковыми путями существуют в нескольких монтированиях с одинаковым приоритетом, победитель выбирается по алфавитному порядку реального пути. Измените приоритеты в настройках монтирований, чтобы избежать неоднозначности.',
+
+	// Sync warning section in header
+	'syncWarning.header': 'Платформа: {platform} | ID устройства: {deviceId}',
+	'syncWarning.pluginNameHeader': 'Предупреждение о синхронизации:',
+	'syncWarning.body': 'Если вы используете Obsidian Sync или Syncthing, вы должны добавить имена виртуальных папок в список игнорируемых для синхронизации (напр. .stignore или исключённые папки Obsidian Sync). Иначе движок синхронизации попытается загрузить всё содержимое ваших подключённых папок!',
+
+	// Default creation vault
+	'settings.defaultCreationVault.name': 'Хранилище по умолчанию для создания',
+	'settings.defaultCreationVault.desc': 'При создании нового файла по пути, существующему в нескольких источниках: «Локальное хранилище» всегда создаёт в основном хранилище; «Монтирования» создаёт в монтировании с наивысшим приоритетом.',
+	'settings.defaultCreationVault.localVault': 'Локальное хранилище',
+	'settings.defaultCreationVault.mounts': 'Монтирования',
+
+	// Conflict resolution
+	'settings.conflictResolution.foldersWin': 'Папки побеждают (по умолчанию)',
+	'settings.conflictResolution.filesWin': 'Файлы побеждают',
+
+	// Settings - Global options
+	'settings.dryRun.name': 'Режим пробного прогона',
+	'settings.dryRun.desc': 'Записывать операции записи в консоль без их выполнения. Полезно для отладки.',
+
+	'settings.enableMountMerging.name': 'Включить объединение монтирования',
+	'settings.enableMountMerging.desc': 'Включить разрешение конфликтов на основе приоритетов между хранилищем и подключенными папками. При отключении все операции ввода-вывода делаются напрямую без проверок приоритетов. Это улучшает производительность на медленных сетевых монтированиях (WebDAV, S3), но отключает функцию объединения.',
+
+	'settings.debugLogging.name': 'Отладочное логирование',
+	'settings.debugLogging.desc': 'Записывать подробные отладочные логи в консоль Obsidian. Полезно для устранения неполадок с разрешением конфликтов.',
+
+	'settings.showStatusBar.name': 'Показывать элемент строки состояния',
+	'settings.showStatusBar.desc': 'Отображать количество активных монтирований в строке состояния Obsidian.',
+
+	'settings.mountRootDeletionBehavior.name': 'Поведение при удалении корня монтирования',
+	'settings.mountRootDeletionBehavior.desc': 'Что делать при удалении подключенной папки из файлового менеджера?',
+	'settings.mountRootDeletionBehavior.options.ask': 'Спрашивать каждый раз',
+	'settings.mountRootDeletionBehavior.options.unmount': 'Только отключить (сохранить реальные файлы)',
+	'settings.mountRootDeletionBehavior.options.delete': 'Удалить навсегда (уничтожить реальные файлы)',
+
+	'settings.allowForeignMounts.name': 'Разрешить чужие монтирования',
+	'settings.allowForeignMounts.desc': 'Разрешить монтирование путей, созданных на других устройствах. Включите это, если вы используете Syncthing для синхронизации реальных подключенных папок между устройствами, и пути идентичны.',
+
+	'settings.maxDataUriMB.name': 'Размер данных изображений / PDF (МБ)',
+	'settings.maxDataUriMB.desc': 'Максимальный размер файла, который будет встраиваться как data: URI (для изображений и PDF во внешних монтированиях). Файлы большего размера возвращаются к URL-адресу ресурса. По умолчанию: 10 МБ.',
+	'settings.maxDataUriMB.placeholder': '10',
+
+	// Language settings
+	'settings.language.name': 'Язык',
+	'settings.language.desc': 'Выбор языка интерфейса',
+	'settings.language.auto': 'Авто',
+	'settings.language.en': 'Английский',
+	'settings.language.ru': 'Русский',
+
+	// Commands
+	'command.refreshMounts.name': 'Обновить все монтирования',
+	'command.addMount.name': 'Добавить монтирование',
+	'command.openSettings.name': 'Открыть настройки',
+	'command.toggleMount.name': 'Включить/выключить монтирование…',
+	'command.toggleMount.placeholder': 'Выберите монтирование для включения/выключения',
+	'command.reconnectMounts.name': 'Переподключить недоступные монтирования',
+	'command.toggleReadOnlyAll.name': 'Переключить режим «только чтение» для всех монтирований',
+	'command.toggleReadOnlyMount.name': 'Переключить режим «только чтение» для конкретного монтирования…',
+	'command.toggleReadOnlyMount.placeholder': 'Выберите монтирование для переключения режима «только чтение».',
+	'command.toggleWatcherAll.name': 'Переключить подавление событий наблюдателя (все монтирования)',
+	'command.toggleWatcherMount.name': 'Переключить подавление событий наблюдателя для конкретного монтирования…',
+	'command.toggleWatcherMount.placeholder': 'Выберите монтирование для переключения подавления событий наблюдателя.',
+	'command.tagMount.name': 'Подключить/отключить #{tag}',
+	'command.tagMountOn.name': 'Подключить #{tag}',
+	'command.tagMountOff.name': 'Отключить #{tag}',
+	'command.tagMount.placeholder': 'Выберите монтирование для тега #{tag}',
+	'command.tagMount.on': 'Folder Bridge: #{tag} подключено ({count} монтирований).',
+	'command.tagMount.off': 'Folder Bridge: #{tag} отключено ({count} монтирований).',
+
+	// States
+	'state.readOnly': 'Только чтение',
+	'state.writable': 'Доступно для записи',
+	'state.suppressed': 'Подавлено',
+	'state.active': 'Активно',
+
+	// Context menu
+	'menu.mountExternalFolder': 'Подключить внешнюю папку здесь…',
+	'menu.copyTo': 'Копировать в…',
+	'menu.moveTo': 'Переместить в…',
+	'menu.moveMountTo': 'Переместить монтирование в…',
+	'menu.ignore': 'Игнорировать «{name}» в Folder Bridge',
+	'ignore.added': 'Folder Bridge: «{name}» добавлен в список игнорируемых для монтирования «{mount}».',
+	'ignore.already': 'Folder Bridge: «{name}» уже есть в списке игнорируемых для этого монтирования.',
+
+	// Watcher notices
+	'watcher.suppressedAll': 'Folder Bridge: события наблюдателя подавлены. Изменения из внешней синхронизации не будут запускать другие плагины.',
+	'watcher.restoredAll': 'Folder Bridge: события наблюдателя восстановлены. Изменения из внешней синхронизации снова будут запускать другие плагины.',
+	'watcher.suppressedMount': 'Folder Bridge: события наблюдателя для «{mount}» подавлены.',
+	'watcher.restoredMount': 'Folder Bridge: события наблюдателя для «{mount}» восстановлены.',
+
+
+	// Extended features section
+	'settings.enableMoveCopyMenu.name': 'Включить команды перемещения/копирования в контекстное меню',
+	'settings.enableMoveCopyMenu.desc': 'Добавляет пункты «Копировать…» и «Переместить…» в контекстное меню файлов и папок в файловом менеджере. Требуется включённое объединение монтирования для кросс-хранилищных операций с разрешением конфликтов.',
+
+	'settings.enableExplorerHighlight.name': 'Подсветка в файловом менеджере',
+	'settings.enableExplorerHighlight.desc': 'Раскрашивать файлы в дереве файлов по источнику монтирования. Файлы локального хранилища не подсвечиваются.',
+
+	'settings.vaultPriority.name': 'Приоритет хранилища',
+	'settings.vaultPriority.desc': 'Приоритет локального хранилища при разрешении конфликтов. Если файл или папка существуют в хранилище и в монтировании, побеждает тот, у которого выше приоритет. По умолчанию: 1000.',
+	'settings.vaultPriority.placeholder': '1000',
+
+	'settings.conflictResolution.name': 'Разрешение конфликтов',
+	'settings.conflictResolution.desc': 'Если файл и папка имеют одинаковые имена в разных монтированиях или хранилище, какой тип побеждает? «Папки побеждают» приоритизирует папки; «Файлы побеждают» приоритизирует файлы. Применяется только при равных приоритетах.',
+
+	// Mount type labels
+	'mountType.local': 'Локальная файловая система',
+	'mountType.vault': 'Другой vault Obsidian',
+	'mountType.webdav': 'WebDAV (Nextcloud, общие)',
+	'mountType.s3': 'Amazon S3 / Backblaze B2',
+	'mountType.sftp': 'SFTP (передача файлов по SSH)',
+
+	// Short mount type labels
+	'mountTypeShort.vault': 'Хранилище',
+	'mountTypeShort.local': 'Локальная',
+	'mountTypeShort.webdav': 'WebDAV',
+	'mountTypeShort.s3': 'S3',
+	'mountTypeShort.sftp': 'SFTP',
+
+	// Mount type description
+	'mountType.desc': 'Выберите тип хранилища для этой точки монтирования',
+
+	// WebDAV settings
+	'webdav.serverUrl.name': 'URL сервера WebDAV',
+	'webdav.serverUrl.desc': 'Полный URL WebDAV-сервера, напр. https://cloud.example.com/remote.php/dav/files/username',
+	'webdav.serverUrl.placeholder': 'https://cloud.example.com/remote.php/dav/files/username',
+
+	'webdav.remotePath.name': 'Удалённый путь',
+	'webdav.remotePath.desc': 'Путь на сервере WebDAV для использования в качестве корня монтирования, напр. / или /Documents. Используйте / для корня сервера.',
+	'webdav.remotePath.placeholder': '/',
+
+	'webdav.username.name': 'Имя пользователя',
+	'webdav.username.placeholder': 'Ваше-имя-пользователя',
+
+	'webdav.password.name': 'Пароль',
+	'webdav.password.saved': 'Надёжно сохранено на этом устройстве. Оставьте пустым, чтобы сохранить, либо введите новое значение для замены.',
+	'webdav.password.unchanged': 'Оставьте пустым, чтобы сохранить существующий пароль. Введите новое значение, чтобы заменить его.',
+	'webdav.password.encrypted': 'Шифруется и сохраняется на этом устройстве — переживает перезапуск Obsidian.',
+	'webdav.password.savedPlaceholder': '(сохранено — оставьте пустым, чтобы сохранить)',
+	'webdav.password.unchangedPlaceholder': '(без изменений)',
+	'webdav.password.placeholder': 'пароль',
+
+	// WebDAV presets
+	'preset.quickFill': 'Предзаполнение',
+	'preset.desc': 'Опционально выберите сервис для предзаполнения поля URL-адреса ниже.',
+	'preset.s3Desc': 'Выберите совместимый с S3 сервис для предзаполнения полей ниже.',
+	'preset.nextcloud.name': 'Nextcloud',
+	'preset.owncloud.name': 'ownCloud',
+	'preset.synology.name': 'Synology',
+	'preset.qnap.name': 'QNAP',
+	'preset.nextcloud.note': 'Замените cloud.example.com и YOUR_USERNAME на свои значения.',
+	'preset.owncloud.note': 'Замените cloud.example.com и YOUR_USERNAME на свои значения.',
+	'preset.synology.note': 'Включите WebDAV в панели управления Synology → Файлы → WebDAV.',
+	'preset.qnap.note': 'Включите WebDAV в панели управления QNAP → Веб-сервер → WebDAV.',
+	'preset.aws.note': 'Используйте IAM-пользователя с правами чтения/записи S3. Access key ID + secret access key.',
+	'preset.b2.note': 'Используйте Backblaze Application Key с доступом на чтение/запись к бакету. Укажите endpoint вашего региона бакета.',
+	'preset.minio.note': 'Собственный MinIO. Требуется path-style. Укажите endpoint вашего MinIO.',
+	'preset.cloudflare.note': 'Cloudflare R2. Замените <ACCOUNT_ID> на ID вашего аккаунта Cloudflare.',
+
+	// S3 settings
+	's3.bucket.name': 'Имя бакета',
+	's3.bucket.desc': 'Имя бакета S3 или Backblaze B2 (чувствительно к регистру)',
+	's3.bucket.placeholder': 'My-Obsidian-bucket',
+
+	's3.region.name': 'Регион',
+	's3.region.desc': 'Регион AWS (например us-east-1) или строка региона B2 (например us-west-004)',
+	's3.region.placeholder': 'us-east-1',
+
+	's3.endpoint.name': 'Пользовательский URL конечной точки (опционально)',
+	's3.endpoint.desc': 'Оставьте пустым для AWS S3. Для Backblaze B2 укажите конечную точку вашего региона, напр. https://s3.us-west-004.backblazeb2.com',
+	's3.endpoint.placeholder': 'https://s3.us-west-004.backblazeb2.com (оставьте пустым для AWS)',
+
+	's3.keyPrefix.name': 'Префикс ключа / путь',
+	's3.keyPrefix.desc': 'Опциональный префикс папки внутри бакета для использования в качестве корня монтирования, напр. / для корня бакета или /notes/ для подпапки.',
+	's3.keyPrefix.placeholder': '/',
+
+	's3.accessKeyId.name': 'Идентификатор ключа доступа',
+	's3.accessKeyId.desc': 'Идентификатор ключа доступа AWS или ключ приложения (Backblaze B2)',
+	's3.accessKeyId.placeholder': 'AKIAIOSFODNN7EXAMPLE',
+
+	's3.secretKey.name': 'Секретный ключ доступа',
+	's3.secretKey.saved': 'Надёжно сохранено на этом устройстве. Оставьте пустым, чтобы сохранить, либо введите новое значение для замены.',
+	's3.secretKey.unchanged': 'Оставьте пустым, чтобы сохранить существующий ключ. Введите новое значение, чтобы заменить его.',
+	's3.secretKey.encrypted': 'Шифруется и сохраняется на этом устройстве — переживает перезапуск Obsidian.',
+	's3.secretKey.savedPlaceholder': '(сохранено — оставьте пустым, чтобы сохранить)',
+	's3.secretKey.placeholder': 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+
+	's3.forcePathStyle.name': 'Принудительное использование пути-стиля',
+	's3.forcePathStyle.desc': 'Требуется для Backblaze B2, MinIO и большинства самостоятельных серверов S3. Отключите для Amazon S3 и Cloudflare R2.',
+
+	// SFTP settings
+	'sftp.host.name': 'Хост',
+	'sftp.host.desc': 'Имя хоста или IP-адрес SFTP-сервера',
+	'sftp.host.placeholder': 'files.example.com',
+
+	'sftp.port.name': 'Порт',
+	'sftp.port.desc': 'Порт SSH (по умолчанию 22)',
+	'sftp.port.placeholder': '22',
+
+	'sftp.username.name': 'Имя пользователя',
+	'sftp.username.placeholder': 'Алиса',
+
+	'sftp.password.name': 'Пароль',
+	'sftp.password.saved': 'Надёжно сохранено на этом устройстве. Оставьте пустым, чтобы сохранить, либо введите новое значение для замены.',
+	'sftp.password.unchanged': 'Оставьте пустым, чтобы сохранить существующий пароль.',
+	'sftp.password.newDesc': 'Используется для аутентификации по паролю. Оставьте пустым, если используется приватный ключ ниже.',
+	'sftp.password.encrypted': 'Шифруется и сохраняется на этом устройстве — переживает перезапуск Obsidian.',
+	'sftp.password.savedPlaceholder': '(сохранено — оставьте пустым, чтобы сохранить)',
+	'sftp.password.placeholder': 'пароль (или оставьте пустым для аутентификации по ключу)',
+
+	'sftp.privateKey.name': 'Путь к файлу приватного ключа (опционально)',
+	'sftp.privateKey.desc': 'Абсолутный путь к файлу вашего SSH-приватного ключа на этом устройстве, напр. /home/alice/.ssh/id_ed25519. Оставьте пустым для аутентификации по паролю.',
+	'sftp.privateKey.placeholder': '/home/yourname/.ssh/id_ed25519',
+
+	'sftp.passphrase.name': 'Пассфраза приватного ключа (опционально)',
+	'sftp.passphrase.saved': '(сохранено — оставьте пустым для сохранения)',
+	'sftp.passphrase.placeholder': 'пассфраза (если ключ зашифрован)',
+	'sftp.passphrase.savedDesc': 'Надёжно сохранено на этом устройстве. Оставьте пустым, чтобы сохранить.',
+	'sftp.passphrase.unchangedDesc': 'Оставьте пустым, чтобы сохранить текущую пассфразу.',
+	'sftp.passphrase.neededDesc': 'Нужна только если ваш приватный ключ защищён пассфразой.',
+	'sftp.passphrase.savedPlaceholder': '(сохранено — оставьте пустым для сохранения)',
+
+	'sftp.remotePath.name': 'Удалённый базовый путь',
+	'sftp.remotePath.desc': 'Абсолютный путь на удалённом сервере, используемый как корень монтирования, напр. /home/alice/notes',
+	'sftp.remotePath.placeholder': '/home/alice/notes',
+
+	// Real path settings
+	'vault.realPath.name': 'Реальный путь (на диске)',
+	'vault.realPath.desc': 'Абсолютный путь к внешней папке, которую вы хотите примонтировать',
+	'vault.realPath.placeholder': 'Введите или выберите путь',
+
+	'vault.fallbackPath.name': 'Резервный путь (опционально)',
+	'vault.fallbackPath.desc': 'Введите резервную папку для этого устройства',
+	'vault.fallbackPath.placeholder': 'Введите резервную папку для этого устройства',
+
+	// Mount state
+	'mountState.browse': 'Просмотреть…',
+	'mountState.browse.tooltip': 'Открыть системный выбор папки',
+	'mountState.wslBrowse': 'Просмотреть WSL…',
+	'mountState.wslBrowse.tooltip': 'Открыть системный выбор папки в вашем WSL Linux',
+
+	// Modal titles and descriptions
+	'welcome.title': 'Добро пожаловать в Folder Bridge',
+	'welcome.intro': 'Folder Bridge позволяет монтировать внешние папки в ваше хранилище как непрерывающие, нативные директории, без копирования, дублирования или создания символических ссылок.',
+	'welcome.features': 'Что можно монтировать',
+	'welcome.feature.local': 'Локальные папки на этом устройстве (или подключённый диск)',
+	'welcome.feature.webdav': 'WebDAV-серверы — Nextcloud, ownCloud, NAS, Synology',
+	'welcome.feature.vault': 'Папки из другого хранилища Obsidian на этом устройстве',
+	'welcome.expanded': 'Подключённые папки мгновенно появляются в файловом менеджере, поддерживают полнотекстовый поиск, быстрый переключатель и все ваши плагины.',
+	'welcome.tip': '💡 быстрый совет: после добавления монтирования вы можете управлять им из настроек, затем Folder Bridge. Параметры монтирования: только для чтения, собственный список игнорируемых, настройка наблюдателя и переопределения путей для устройства.',
+	'welcome.btnAdd': 'Добавить первое монтирование',
+	'welcome.btnExplore': 'Я сам исследую',
+
+	'mountManager.title': 'Добавить точку монтирования',
+	'mountManager.editTitle': 'Редактировать точку монтирования',
+
+	'folderBrowser.unavailable': 'Системный выбор папки недоступен. Введите путь вручную.',
+	'vaultBrowser.placeholder': 'Введите для поиска папок хранилища… (оставьте пустым для корня)',
+	'vaultBrowser.root': '(корень хранилища)',
+
+	'vault.otherVault.name': 'Корневая папка другого хранилища',
+	'vault.otherVault.desc': 'Абсолютный путь к корню другого хранилища Obsidian',
+	'vault.otherVault.path': '/home/yourname/MyOtherVault',
+	'vault.mountedDesc': 'Подключение к другому хранилищу Obsidian на этом устройстве. Конфигурационная папка (configDir) и .trash автоматически исключаются. Заметки и вложения из другого хранилища отображаются как обычные файлы в вашем текущем хранилище.',
+
+	'conflictResolution.title': 'Назначение уже существует',
+	'conflictResolution.desc': 'Файл или папка с именем «{fileName}» уже существует в месте назначения. Что сделать с этим {opLabel}?{conflictInfo}',
+	'conflictResolution.currentIndex': ' ({index} из {total})',
+	'conflictResolution.overwrite': 'Перезаписать',
+	'conflictResolution.overwriteAll': 'Перезаписать все',
+	'conflictResolution.skip': 'Пропустить',
+	'conflictResolution.skipAll': 'Пропустить все',
+	'conflictResolution.cancel': 'Отмена',
+
+	'largeFileWarning.title': 'Предупреждение о большом файле',
+	'largeFileWarning.desc': 'Вы собираетесь {op} «{fileName}» ({sizeLabel}) в монтирование «{mountLabel}» ({mountTypeLabel}). У этого монтирования включены предупреждения о крупных файлах. Продолжить?',
+	'largeFileWarning.mountFallback': 'Монтирование ({id})',
+	'largeFileWarning.confirm': 'Подтвердить',
+	'largeFileWarning.disable': 'Отключить предупреждения для этого монтирования',
+	'largeFileWarning.cancel': 'Отмена',
+	'largeFileWarning.failed': 'Folder Bridge: Не удалось обновить настройки монтирования.',
+	'largeFileWarning.disabled': 'Folder Bridge: Предупреждения о больших файлах отключены для монтирования "{mount}".',
+
+	'mountDelete.title': 'Удалить подключённую папку',
+	'mountDelete.desc1': 'Вы собираетесь удалить корень подключённой папки "{path}".',
+	'mountDelete.desc2': 'Вы хотите permanently удалить реальную папку на диске или просто отключить её в Obsidian?',
+	'mountDelete.dontAsk': "Не спрашивать снова",
+	'mountDelete.dontAsk.desc': 'Сохранить это решение в настройках',
+	'mountDelete.unmount': 'Отключить только',
+	'mountDelete.delete': 'Удалить реальную папку',
+
+	'destinationPicker.placeholder': 'Введите для поиска назначений…',
+
+	// Ignore settings
+	'ignore.list.name': 'Список игнорируемых',
+	'ignore.list.desc': 'Шаблоны для скрытия определённых файлов/папок внутри этого монтирования из Obsidian.',
+	'ignore.list.empty': 'Для этого монтирования ничего не игнорируется.',
+	'ignore.list.add': 'Добавить',
+	'ignore.list.browse': 'Просмотреть…',
+	'ignore.list.browse.tooltip': 'Открыть системный выбор папки',
+	'ignore.list.placeholder': 'Имя (напр. .DS_Store) или путь (напр. vendor/cache)',
+
+	// Global ignore
+	'globalIgnore.name': 'Списки игнорируемых',
+	'globalIgnore.add': 'Добавить',
+	'globalIgnore.placeholder': 'напр. .DS_Store, Thumbs.db, *.tmp, node_modules',
+
+	// TOC settings
+	'toc.manage.name': 'Управляемый источник TOC',
+	'toc.manage.desc': 'Опциональный записываемый TOC-файл для локальных и vault-монтирований, управляемых через интерфейс',
+	'toc.manage.placeholder': 'Введите абсолютный путь к JSON-файлу, где будут сохраняться определения монтирований',
+	'toc.manage.fallbackLabel': 'Резервный путь TOC:',
+	'toc.manage.fallbackPlaceholder': 'Резервный путь для другого устройства, напр. C:\\Users\\me\\folderbridge.managed.json',
+	'toc.manage.set': 'Задать',
+	'toc.manage.rebind': 'Перепривязать',
+	'toc.manage.createFromUi': 'Создать из текущих UI-монтирований',
+	'toc.manage.disable': 'Отключить',
+	'toc.manage.migrate': 'Перенести локальные/vault-монтирования сюда',
+	'toc.manage.current': 'Текущий управляемый TOC-файл: {path}',
+	'toc.manage.none': 'Управляемый TOC-файл не настроен. Созданные через интерфейс локальные и vault-монтирования останутся в data.json, пока вы его не зададите.',
+	'toc.manage.suggested': 'Предлагаемое расположение: {path}',
+	'toc.manage.fallbackActive': 'Используется резервный TOC-файл на этом устройстве: {path}',
+	'toc.manage.existingNotice': 'Управляемый источник TOC уже настроен.',
+	'toc.manage.created': 'Folder Bridge: создан {path}. Новые локальные и vault-монтирования будут записываться туда.',
+	'toc.manage.createdMoved': 'Folder Bridge: создан {path}, туда перемещено локальных и vault-монтирований: {moved}.{skipped}',
+	'toc.manage.migrated': 'Folder Bridge: перемещено локальных и vault-монтирований в управляемый TOC-файл: {moved}.{skipped}',
+	'toc.manage.nothingToMigrate': '{pluginName}: локальные и vault-монтирования не требовали переноса.',
+	'toc.manage.setFallback': 'Задать резервный путь',
+	'toc.manage.fallbackBrowseTitle': 'Выберите резервную папку для TOC',
+	'toc.manage.skippedCloud': ' Облачных монтирований осталось в data.json: {skipped}.',
+
+	'toc.external.name': 'Внешние источники TOC',
+	'toc.external.desc': 'Абсолютные пути к JSON-файлам, определяющим дополнительные монтирования',
+	'toc.external.note': 'Внешние TOC-файлы доступны только на десктопе и остаются авторитетными. Монтирования из этих файлов отображаются ниже, но должны редактироваться в своём исходном файле.',
+	'toc.external.none': 'Внешние TOC-конфиги не настроены.',
+	'toc.external.add': 'Добавить',
+	'toc.external.placeholder': 'Абсолютный путь к доступному только для чтения TOC JSON-файлу, напр. /home/me/folderbridge.mounts.json',
+	'ignore.list.browseTitle': 'Выберите папку(и) для игнорирования в «{mount}»',
+	'ignore.list.added': 'Folder Bridge: в список игнорируемых добавлено элементов: {count}.',
+	'ignore.list.multiSelectHint': 'Удерживайте Ctrl / Cmd для выбора нескольких папок',
+
+	// Sync warning
+	'syncWarning.title': 'Предупреждение о синхронизации:',
+	'syncWarning.desc': 'Если вы используете Obsidian Sync или Syncthing, вы должны добавить имена виртуальных папок в список игнорируемых для синхронизации (напр. .stignore или исключённые папки Obsidian Sync). Иначе движок синхронизации попытается загрузить всё содержимое ваших подключённых папок!',
+
+	// Mount manager modal
+	'mountManager.browserUnavailable': 'Системный обзор папок недоступен. Введите путь вручную.',
+	'mountManager.selectFolder': 'Выберите папку',
+	'mountManager.selectFolders': 'Выберите папки',
+	'mountManager.selectWslFolder': 'Выберите папку WSL',
+	'mountManager.selectFallbackFolder': 'Выберите резервную папку',
+	'mountManager.browseFallbackAriaLabel': 'Обзор резервной папки на диске',
+	'mountManager.browseForLabel': 'Обзор папки {label} на диске',
+	'mountManager.browseVaultFolders': 'Обзор папок хранилища',
+	'mountManager.preset.select': '— выберите пресет —',
+	'mountManager.submit.save': 'Сохранить изменения',
+	'mountManager.submit.add': 'Проверить и добавить',
+	'mountManager.submit.saving': 'Сохранение…',
+	'mountManager.submit.adding': 'Добавление…',
+	'mountManager.virtualPath.desc': 'Где эта папка появится внутри вашего хранилища, напр. "Projects/Work". Используйте «Обзор хранилища…», чтобы выбрать существующую папку хранилища в качестве родительского каталога, а затем уточните имя конечной папки. Оставьте пустым, чтобы использовать имя реальной папки в корне хранилища.',
+	'mountManager.useFolderNameAsLabel.desc': 'Автоматически подставлять имя реальной папки в поле метки ниже. Метка отображается в панели настроек вместо полного пути.',
+	'mountManager.highlightColor.none': 'Нет (по умолчанию)',
+	'mountManager.highlightColor.blue': 'Синий',
+	'mountManager.highlightColor.orange': 'Оранжевый',
+	'mountManager.highlightColor.green': 'Зелёный',
+	'mountManager.highlightColor.red': 'Красный',
+	'mountManager.highlightColor.purple': 'Фиолетовый',
+	'mountManager.highlightColor.teal': 'Бирюзовый',
+	'mountManager.highlightColor.yellow': 'Жёлтый',
+	'mountManager.vaultPlaceholder': 'Введите для поиска папок хранилища… (оставьте пустым для корня хранилища)',
+	'mountManager.mobileOnly': 'На мобильных устройствах поддерживаются только монтирования {webdav} и {s3}. Локальная файловая система, хранилище и SFTP требуют {desktop}.',
+	'mountManager.selectOtherVaultRoot': 'Выберите корень другого хранилища',
+	'mountManager.selectExternalFolder': 'Выберите внешнюю папку',
+	'mountManager.browseAriaLabel': 'Обзор папок на диске',
+	'mountManager.webdavNote': 'Чтобы получить доступ к локальным файлам на этом устройстве, установите приложение WebDAV-сервера (например CX File Explorer) и подключитесь к http://localhost:PORT/',
+	'mountManager.s3Note': 'Подключите бакет Amazon S3 или Backblaze B2 через совместимый с S3 API. Файлы отображаются как обычные заметки в вашем хранилище. Примечание: в S3 нет нативного переименования папок — переименование выполняется как копирование + удаление, что может быть медленным для больших каталогов.',
+	'mountManager.sftpNote': 'Подключите удалённый каталог по SSH/SFTP. Требуется сетевое подключение. На удалённом сервере должна быть включена подсистема SFTP (стандартно для OpenSSH). Монтирования SFTP доступны только на настольных версиях.',
+	'mountManager.wslTipOr': 'или',
+	'mountManager.wslTipAddressBar': 'Любой из этих путей можно ввести в адресную строку диалога выбора папки.',
+	'mountManager.wslPath1': '\\\\wsl.localhost\\<Distro>\\path (Windows 11 / Win 10 21H1+)',
+	'mountManager.wslPath2': '\\\\wsl$\\<Distro>\\path (более старые версии Windows 10)',
+	'mountManager.mountTypeName': 'Тип монтирования',
+	'mountManager.browse': 'Обзор…',
+	'mountManager.browseTooltip': 'Открыть системный выбор папок',
+	'mountManager.browseVault': 'Обзор хранилища…',
+	'mountManager.browseVaultTooltip': 'Выберите существующую папку хранилища в качестве родительского каталога',
+	'mountManager.virtualPath.name': 'Виртуальный путь (в хранилище)',
+	'mountManager.virtualPath.placeholder': 'Projects/work',
+	'mountManager.useFolderNameAsLabel': 'Использовать имя папки как метку',
+	'mountManager.label.name': 'Метка (необязательно)',
+	'mountManager.label.desc': 'Отображаемое имя вместо виртуального пути в панели настроек',
+	'mountManager.label.placeholder': 'Мои рабочие документы',
+	'mountManager.readOnly': 'Только чтение',
+	'mountManager.additionalSettings': 'Дополнительные настройки',
+	'mountManager.advancedSettings': 'Расширенные настройки',
+	'mountManager.tags.name': 'Теги',
+	'mountManager.tags.desc': 'Теги через запятую для группировки монтирований (например «work, backup»). Используйте #тег в палитре команд, чтобы подключить/отключить все подходящие монтирования.',
+	'mountManager.tags.placeholder': 'work, backup',
+	'mountManager.priority.name': 'Приоритет',
+	'mountManager.priority.desc': 'Приоритет при разрешении конфликтов, когда файлы или папки с одинаковым именем есть в нескольких монтированиях или в локальном хранилище. Побеждает большее число.',
+	'mountManager.priority.placeholder': '1000',
+	'mountManager.addCommand.name': 'Добавить команду в палитру',
+	'mountManager.addCommand.desc': 'Зарегистрировать команду в палитре команд Obsidian для быстрого переключения этого монтирования. К ней можно назначить горячую клавишу в настройках горячих клавиш Obsidian.',
+	'mountManager.largeFileWarning.name': 'Предупреждать о больших файлах',
+	'mountManager.largeFileWarning.desc': 'Показывать окно подтверждения при копировании или перемещении файлов больше указанного порога в это монтирование.',
+	'mountManager.largeFileWarning.threshold.name': 'Порог (КБ)',
+	'mountManager.largeFileWarning.threshold.desc': 'Порог размера файла в килобайтах для предупреждения о больших файлах. Папки измеряются рекурсивно. По умолчанию: 1024 (1 МБ).',
+	'mountManager.largeFileWarning.threshold.placeholder': '1024',
+	'mountManager.highlightColor.name': 'Цвет подсветки в обозревателе',
+	'mountManager.highlightColor.desc': 'Выберите цвет для подсветки файлов из этого монтирования в дереве файлов. «Нет» использует стиль темы по умолчанию. Файлы локального хранилища не подсвечиваются никогда.',
+	'mountManager.wslTip1': 'Подсказка по WSL: чтобы подключить папку Linux (WSL 2) в Obsidian под Windows, используйте',
+	'mountManager.wslTip2': 'Подсказка по WSL: диски Windows доступны по пути /mnt/c/, /mnt/d/ и т. д.',
+	'mountManager.saveFailed': '<pluginName>: не удалось сохранить монтирование. Проверьте консоль разработчика для деталей.',
+	'mountManager.required': '<pluginName>: поле «{field}» обязательно.',
+	'mountManager.urlInvalid': '<pluginName>: WebDAV-URL некорректен. Укажите схему, например https://…',
+	'mountManager.noAccessiblePath': '<pluginName>: ни один из настроенных путей-источников не является доступным каталогом.',
+
+	// Watcher settings (per mount)
+	'watcher.debounce.name': 'Порог задержки (мс)',
+	'watcher.debounce.desc': 'Сколько ждать после последнего события изменения, прежде чем уведомить Obsidian. Увеличьте для редакторов, которые сохраняют очень часто. (по умолчанию: 300)',
+	'watcher.debounce.placeholder': '300',
+	'watcher.polling.name': 'Использовать опрос',
+	'watcher.polling.desc': 'Опрашивать файловую систему вместо нативных событий ОС. Полезно для сетевых дисков. (по умолчанию: выключено)',
+	'watcher.pollingInterval.name': 'Интервал опроса (мс)',
+	'watcher.pollingInterval.desc': 'Как часто опрашивать файловую систему на наличие изменений. Действует только при включённом «использовать опрос». (по умолчанию: 2000)',
+	'watcher.pollingInterval.placeholder': '2000',
+	'watcher.visibleFileTypes.name': 'Видимые типы файлов',
+	'watcher.visibleFileTypes.desc': 'Ограничивает, какие файлы этого монтирования доступны в Obsidian. Папки остаются доступными для просмотра, но в проводнике, поиске и при стартовом сканировании видны только подходящие файлы.',
+	'watcher.visibleFileTypes.all': 'Все типы файлов (по умолчанию)',
+	'watcher.visibleFileTypes.markdownOnly': 'Только Markdown (.md, .mdx, .canvas)',
+	'watcher.visibleFileTypes.pdfOnly': 'Только PDF',
+	'watcher.newFileEvents.name': 'События новых файлов',
+	'watcher.newFileEvents.desc': 'Определяет, какие новые файлы наблюдатель сообщает Obsidian. Режим «Только Markdown» не даёт плагинам автоматического переименования вложений переименовывать изображения или PDF, созданные другим приложением внутри этого монтирования. Новые файлы, не относящиеся к Markdown, всё же появятся после ручного обновления.',
+	'watcher.newFileEvents.all': 'Все типы файлов (по умолчанию)',
+	'watcher.newFileEvents.markdownOnly': 'Только Markdown (без автопереименования)',
+	'watcher.suppressAll.name': 'Подавить все события наблюдателя',
+	'watcher.suppressAll.desc': 'Когда включено, наблюдатель файлов отслеживает эту папку, но никогда не передаёт события в Obsidian. Полезно, если папкой управляет внешний инструмент синхронизации (rclone, Syncthing, Obsidian Sync в другом хранилище и т. д.), и вы не хотите, чтобы плагины переименования вложений или рефакторинга заметок реагировали на входящие файлы. Файлы, созданные вами внутри Obsidian (например, вставка изображения из буфера обмена), не затрагиваются — для них Obsidian создаёт собственное внутреннее событие. Это также можно переключить во время работы через палитру команд или из скрипта: app.plugins.getPlugin(\'folderbridge\').setWatcherSuppressed(null, true).',
+	'watcher.maxFiles.name': 'Максимум файлов (лимит сканирования)',
+	'watcher.maxFiles.desc': 'Остановить первоначальное сканирование хранилища после указанного количества элементов. Оставьте пустым без ограничений. Это помогает Obsidian оставаться отзывчивым при очень больших монтированиях.',
+	'watcher.maxFiles.placeholder': 'Без ограничений',
+
+	// Misc UI elements
+	'button.remove': 'Удалить',
+	'button.edit': 'Изменить',
+	'button.save': 'Сохранить',
+	'button.cancel': 'Отмена',
+	'button.reconnect': 'Переподключить',
+	'button.browse': 'Обзор...',
+	'button.disable': 'Отключить',
+
+	// Support section
+	'settings.support.name': 'Поддержать {plugin}',
+	'settings.support.desc': 'Следите за работой над проектом, посмотрите другие проекты или поставьте звезду репозиторию на GitHub.',
+	'settings.support.repo.tooltip': 'Открыть репозиторий {plugin}',
+	'settings.support.profile.tooltip': 'Открыть профиль автора на GitHub',
+	'settings.support.coffee.tooltip': 'Поддержать разработку кофе',
+
+	// Status messages
+	'status.reconnecting': 'Folder Bridge: переподключение',
+	'status.refresh.failed': 'Folder Bridge: сбой фонового обновления монтирований. Проверьте консоль разработчика для деталей.',
+	'status.refresh.done': 'Folder Bridge: монтирования обновлены',
+	'status.mounted': 'Folder Bridge: Монтирование',
+	'status.mounted.label': 'Folder Bridge: подключено {mount}',
+	'status.mounted.withEventsSuppressed': 'Folder Bridge: Монтирование "{path}" с подавленными внешними событиями.',
+	'status.mounted.count': 'Folder Bridge: смонтировано папок: {count}, файлов: {fileCount} в "{path}".',
+	'status.unmounted': 'Folder Bridge: Отключение "{path}".',
+	'status.unmounted.cleaned': 'Folder Bridge: Отключено "{path}". Очищено {count} элементов, относящихся только к монтированию.',
+	'status.scanning': 'Folder Bridge: сканирование и подключение "{path}"...',
+	'status.scanningProgress': 'Folder Bridge: сканирование "{path}"... папок: {folderCount}, файлов: {fileCount}',
+	'status.hugeMount': 'Folder Bridge: "{path}" очень большой. Это может занять некоторое время...',
+	'status.scanLimitReached': 'Folder Bridge: достигнут лимит сканирования ({limit} элементов) для "{path}". Увеличьте «Максимум файлов» в дополнительных настройках монтирования, чтобы увидеть больше.',
+	'status.removing': 'Folder Bridge: удаление "{path}"...',
+	'status.expansionSaveFailed': 'Не удалось сохранить состояние раскрытия папок; повтор будет при следующем изменении или выгрузке.',
+	'status.mount.enable': 'Folder Bridge: "{mount}" включено.',
+	'status.mount.disable': 'Folder Bridge: "{mount}" отключено.',
+	'status.mount.reachable': 'Folder Bridge: все монтирования доступны.',
+	'status.mount.refresh': 'Folder Bridge: Подключено {reconnected} / {unreachable} монтирований.',
+	'status.mount.toggle': 'Folder Bridge: все монтирования теперь {state}.',
+	'status.mount.noMounts': 'Folder Bridge: нет настроенных монтирований.',
+	'status.mount.readOnlyState': 'Folder Bridge: «{mount}» теперь {state}.',
+	'status.mount.stillUnreachable': 'Folder Bridge: «{mount}» по-прежнему недоступно.',
+	'status.mount.reconnected': 'Folder Bridge: «{mount}» успешно переподключено.',
+	'status.mounts.removed': 'Folder Bridge: Удалено монтирование "{path}".',
+	'status.mounts.updated': 'Folder Bridge: Обновлено "{path}".',
+
+	// Status bar
+	'statusBar.eventsPaused': '{plugin}: события приостановлены',
+	'statusBar.unreachable': 'Folder Bridge: недоступно — {count}',
+	'statusBar.mounts': 'Folder Bridge: монтирований — {count}',
+
+	// Generic notices
+	'notice.generic': 'Folder Bridge: {message}',
+	'notice.warning': 'Предупреждение Folder Bridge: {message}',
+	'notice.readOnly': 'Folder Bridge: «{path}» доступно только для чтения — это изменение не сохранено.',
+
+	// TOC notices
+	'toc.manage.notice.configureFirst': '<pluginName>: сначала настройте управляемый TOC-файл.',
+	'toc.manage.notice.desktopOnly': '<pluginName>: записываемые TOC-файлы поддерживаются только в настольных сборках с доступом к файловой системе.',
+	'toc.manage.notice.unsupportedType': 'Folder Bridge: управляемые TOC-файлы в настоящее время поддерживают только локальные и vault-монтирования. «{mount}» остаётся в data.json.',
+	'toc.manage.notice.noPath': '<pluginName>: путь к управляемому TOC-файлу не может быть определён автоматически. Сначала введите абсолютный путь.',
+	'toc.manage.notice.initFailed': 'Folder Bridge: не удалось инициализировать управляемый TOC-файл ({message}).',
+	'toc.manage.notice.enterPath': '<pluginName>: сначала введите путь к управляемому TOC-файлу.',
+
+	// Copy/Move messages
+	'copy.copied': 'Folder Bridge: скопировано «{file}» в «{dest}».',
+	'move.moved': 'Folder Bridge: перемещено «{file}» в «{dest}».',
+	'copy.move.failed': 'Folder Bridge: {op} завершилась ошибкой: {message}',
+	'copy.dest.unreachable': 'Folder Bridge: назначение «{dest}» недоступно.',
+
+	// Operation labels
+	'copy.op': 'копирование',
+	'move.op': 'перемещение',
+	'op.create': 'создание',
+
+	// Plugin name
+	'pluginName': 'Folder Bridge',
+};

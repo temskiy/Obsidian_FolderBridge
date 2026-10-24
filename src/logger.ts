@@ -25,7 +25,16 @@ function write(level: LoggerLevel, ...args: unknown[]): void {
 }
 
 export const logger = {
-    debug: (...args: unknown[]) => write('debug', ...args),
+    debug: (...args: unknown[]) => {
+        if ((globalThis as Record<string, unknown>).__folderbridgeDebugLogging) {
+            write('debug', ...args);
+        }
+    },
     warn: (...args: unknown[]) => write('warn', ...args),
     error: (...args: unknown[]) => write('error', ...args),
 };
+
+/** Toggle debug logging at runtime. */
+export function setDebugLogging(enabled: boolean): void {
+    (globalThis as Record<string, unknown>).__folderbridgeDebugLogging = enabled;
+}
