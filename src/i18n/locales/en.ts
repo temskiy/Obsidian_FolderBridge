@@ -463,7 +463,7 @@ export const en: Locale = {
 	'mountManager.tags.placeholder': 'work, backup',
 	'mountManager.priority.name': 'Priority',
 	'mountManager.priority.desc': 'Priority for conflict resolution when files or folders with the same name exist in multiple mounts or the local vault. Higher number wins.',
-	'mountManager.priority.placeholder': '1000',
+	'mountManager.priority.placeholder': '100',
 	'mountManager.addCommand.name': 'Add command to palette',
 	'mountManager.addCommand.desc': "Register a command in Obsidian's command palette to quickly toggle this mount. You can assign a hotkey to it in Obsidian's hotkey settings.",
 	'mountManager.largeFileWarning.name': 'Warn on large file transfers',

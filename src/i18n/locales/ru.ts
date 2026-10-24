@@ -464,7 +464,7 @@ export const ru: Locale = {
 	'mountManager.tags.placeholder': 'work, backup',
 	'mountManager.priority.name': 'Приоритет',
 	'mountManager.priority.desc': 'Приоритет при разрешении конфликтов, когда файлы или папки с одинаковым именем есть в нескольких монтированиях или в локальном хранилище. Побеждает большее число.',
-	'mountManager.priority.placeholder': '1000',
+	'mountManager.priority.placeholder': '100',
 	'mountManager.addCommand.name': 'Добавить команду в палитру',
 	'mountManager.addCommand.desc': 'Зарегистрировать команду в палитре команд Obsidian для быстрого переключения этого монтирования. К ней можно назначить горячую клавишу в настройках горячих клавиш Obsidian.',
 	'mountManager.largeFileWarning.name': 'Предупреждать о больших файлах',

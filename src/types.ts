@@ -20,7 +20,7 @@ export interface MountPoint {
 	enabled: boolean;      // Whether the mount is currently active
 	readOnly: boolean;     // Block all write operations through this mount
 	label?: string;        // Optional human-readable display name
-	priority?: number;     // Mount priority for conflict resolution (higher wins; default 1000)
+	priority?: number;     // Mount priority for conflict resolution (higher wins; default 100)
 	addCommand?: boolean;  // Register a command in Obsidian's command palette for this mount
 	deviceId?: string;     // The device ID that created this mount (for sync compatibility)
 	deviceOverrides?: Record<string, string>; // Map of deviceId -> realPath override

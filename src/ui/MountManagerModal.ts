@@ -193,7 +193,7 @@ export class MountManagerModal extends Modal {
 	private fallbackRealPath = '';
 	private readOnly = false;
 	private label = '';
-	private priority = 1000;
+	private priority = 100;
 	private addCommand = false;
 	private useFolderNameAsLabel = false;
 	// WebDAV fields (password never persisted to data.json)
@@ -264,7 +264,7 @@ export class MountManagerModal extends Modal {
 			this.fallbackRealPath = editMount.fallbackRealPath ?? '';
 			this.readOnly = editMount.readOnly;
 			this.label = editMount.label ?? '';
-			this.priority = editMount.priority ?? 1000;
+			this.priority = editMount.priority ?? 100;
 			this.addCommand = editMount.addCommand ?? false;
 			this.useFolderNameAsLabel = shouldUseFolderNameAsLabel(this.realPath, this.label);
 			// WebDAV
@@ -936,7 +936,7 @@ export class MountManagerModal extends Modal {
 					.setValue(String(this.priority))
 					.onChange(val => {
 						const n = parseInt(val, 10);
-						this.priority = isNaN(n) || n < 0 ? 1000 : n;
+						this.priority = isNaN(n) || n < 0 ? 100 : n;
 					});
 			});
 
