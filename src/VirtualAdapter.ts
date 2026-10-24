@@ -2118,15 +2118,6 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async rename(normalizedPath: string, newNormalizedPath: string): Promise<void> {
-		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-		logger.debug(`[FolderBridge DEBUG rename ENTRY] from="${normalizedPath}" to="${newNormalizedPath}", defaultCreationVault="${this.defaultCreationVault}"`);
-
-		// Respect defaultCreationVault: when set to 'vault', always rename in local vault
-		if (this.defaultCreationVault === 'vault') {
-			logger.debug(`[FolderBridge DEBUG rename] → redirecting to vault (orig().rename)`);
-			return this.orig().rename(normalizedPath, newNormalizedPath);
-		}
-
 		const rootMount = this.pathMapper.getMountByVirtualPath(normalizedPath);
 		if (rootMount) {
 			// The user dragged or moved the mount root folder in the file explorer.
