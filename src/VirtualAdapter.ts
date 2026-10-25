@@ -2129,8 +2129,15 @@ export class VirtualAdapter {
 		const renameSource = await this.resolveDeleteSource(normalizedPath);
 
 		if (renameSource.source === 'vault') {
+			// Check if file actually exists in vault — if not, it was already renamed
+			// by a previous concurrent rename call (Obsidian sometimes calls adapter.rename twice).
+			const vaultExists = await this.orig().exists(normalizedPath);
+			if (!vaultExists) {
+				// File not found — already renamed, idempotent no-op
+				return;
+			}
 			// Rename in local vault — delegate to original adapter
-			this.orig().rename(normalizedPath, newNormalizedPath);
+			await this.orig().rename(normalizedPath, newNormalizedPath);
 			// Notify Obsidian to update the in-memory vault tree
 			await this.notifyRename(normalizedPath, newNormalizedPath);
 			return;
