@@ -126,8 +126,9 @@ export default class FolderBridgePlugin extends Plugin {
 	// Preserve original vault.getResourcePath so we can restore it on unload
  	private originalVaultGetResourcePath: unknown = null;
  	// Preserve original vault.create / vault.createBinary so we can restore on unload
- 	private originalVaultCreate: unknown = null;
- 	private originalVaultCreateBinary: unknown = null;
+	private originalVaultCreate: unknown = null;
+	private originalVaultCreateBinary: unknown = null;
+	private originalVaultCreateFolder: unknown = null;
  	// Preserve original vault adapter (FileSystemAdapter) for direct writes to the vault
  	private originalVaultAdapter: import('obsidian').DataAdapter | null = null;
  	// Preserve original app.openWithDefaultApp so we can restore it on unload
@@ -1043,6 +1044,11 @@ export default class FolderBridgePlugin extends Plugin {
 			this.originalVaultCreateBinary = null;
 		}
 
+		if (this.originalVaultCreateFolder) {
+			(this.app.vault as unknown as { createFolder?: unknown }).createFolder = this.originalVaultCreateFolder;
+			this.originalVaultCreateFolder = null;
+		}
+
 		// Restore the original app.openWithDefaultApp
 		if (this.originalOpenWithDefaultApp) {
 			(this.app as App & AppInternal).openWithDefaultApp = this.originalOpenWithDefaultApp as (filePath: string) => void;
@@ -1945,10 +1951,16 @@ export default class FolderBridgePlugin extends Plugin {
 		this.originalVaultAdapter = vault.adapter;
 		this.originalVaultCreate = vault.create?.bind(vault);
 		this.originalVaultCreateBinary = vault.createBinary?.bind(vault);
+		this.originalVaultCreateFolder = vault.createFolder?.bind(vault);
 
 		type OrigVaultCreate = (path: string, data: string, options?: unknown) => Promise<TFile | null>;
 		type OrigVaultCreateBinary = (path: string, data: ArrayBuffer, options?: unknown) => Promise<TFile | null>;
-		type PatchedVault = { create?: OrigVaultCreate; createBinary?: OrigVaultCreateBinary };
+		type OrigVaultCreateFolder = (path: string) => Promise<TFolder>;
+		type PatchedVault = {
+			create?: OrigVaultCreate;
+			createBinary?: OrigVaultCreateBinary;
+			createFolder?: OrigVaultCreateFolder;
+		};
 
 		(vault as unknown as PatchedVault).create = async (path: string, data: string, options?: unknown): Promise<TFile | null> => {
 			const nPath = normalizePath(path);
@@ -2184,6 +2196,43 @@ export default class FolderBridgePlugin extends Plugin {
 			}
 			const createdBin = this.app.vault.getAbstractFileByPath(nPath);
 			return createdBin instanceof TFile ? createdBin : null;
+		};
+
+		// Patch vault.createFolder() to notify Obsidian about new folders in mounts.
+		//
+		// When a folder is created in a mount, Obsidian's native FS watcher doesn't
+		// detect it (watcher only monitors the vault directory). We must explicitly
+		// fire 'folder-created' so the folder appears in the tree and inline editing
+		// starts immediately (just like for locally-created folders).
+		(vault as unknown as PatchedVault).createFolder = async (path: string): Promise<TFolder> => {
+			const nPath = normalizePath(path);
+			const srcMount = this.pathMapper.getMountForPath(nPath);
+			const defaultVault = this.settings.defaultCreationVault ?? 'vault';
+
+			// Redirect to local vault if defaultCreationVault is 'vault'
+			if (srcMount && defaultVault === 'vault') {
+				// Create in local vault — keep the full virtual path as-is
+				const finalPath = nPath;
+				const parentDir = finalPath.substring(0, finalPath.lastIndexOf('/'));
+				if (parentDir && !await vault.adapter.exists(parentDir)) {
+					try { await vault.adapter.mkdir(parentDir); } catch { /* ignore */ }
+				}
+				const result = await (this.originalVaultCreateFolder as OrigVaultCreateFolder)(finalPath);
+				return result;
+			}
+
+			// Create in mount — use original createFolder
+			const result = await (this.originalVaultCreateFolder as OrigVaultCreateFolder)(nPath);
+
+			// Notify Obsidian so the folder appears in the tree and inline editing starts
+			if (typeof vault.onChange === 'function') {
+				try {
+					await vault.onChange('folder-created', nPath, null, null);
+				} catch {
+					// Best-effort only
+				}
+			}
+			return result;
 		};
 	}
 
