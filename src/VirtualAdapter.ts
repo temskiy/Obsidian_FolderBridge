@@ -81,6 +81,11 @@ export class VirtualAdapter {
 	 * external watcher backend is unavailable or suppressed.
 	 */
 	private onDelete?: (normalizedPath: string) => Promise<void>;
+	/**
+	 * Called after a mounted file or folder is successfully renamed so Obsidian
+	 * can immediately update the in-memory vault tree.
+	 */
+	private onRename?: (oldPath: string, newPath: string) => Promise<void>;
 
 	constructor(
 		original: unknown,
@@ -92,7 +97,8 @@ export class VirtualAdapter {
 		onMountRootMove: (mount: MountPoint, newVirtualPath: string) => Promise<void>,
 		isIgnored: (name: string, mount: MountPoint, mountRelativePath?: string) => boolean,
 		onModify?: (normalizedPath: string) => Promise<void>,
-		onDelete?: (normalizedPath: string) => Promise<void>
+		onDelete?: (normalizedPath: string) => Promise<void>,
+		onRename?: (oldPath: string, newPath: string) => Promise<void>
 	) {
 		this.original = original;
 		this.pathMapper = pathMapper;
@@ -104,6 +110,7 @@ export class VirtualAdapter {
 		this.isIgnored = isIgnored;
 		this.onModify = onModify;
 		this.onDelete = onDelete;
+		this.onRename = onRename;
 	}
 
 	private async notifyDelete(normalizedPath: string): Promise<void> {
@@ -111,6 +118,14 @@ export class VirtualAdapter {
 			await this.onDelete?.(normalizedPath);
 		} catch {
 			// Best-effort only: the delete already succeeded on the backend.
+		}
+	}
+
+	private async notifyRename(oldPath: string, newPath: string): Promise<void> {
+		try {
+			await this.onRename?.(oldPath, newPath);
+		} catch {
+			// Best-effort only: the rename already succeeded on the backend.
 		}
 	}
 
@@ -1265,14 +1280,10 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async write(normalizedPath: string, data: string, options?: unknown): Promise<void> {
-		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-		logger.debug(`[FolderBridge DEBUG write ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
-
 		logger.debug(`[FolderBridge WRITE] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)} hasMounts=${this.pathMapper.getMountsForPath(normalizedPath).length > 0}`);
 
 		// Respect defaultCreationVault: when set to 'vault', always create in local vault
 		if (this.defaultCreationVault === 'vault') {
-			logger.debug(`[FolderBridge DEBUG write] → redirecting to vault (orig().write)`);
 			await this.orig().write(normalizedPath, data, options as DataWriteOptions | undefined);
 			void this.onModify?.(normalizedPath).catch(() => {});
 			return;
@@ -1412,14 +1423,10 @@ export class VirtualAdapter {
 	}
 
 	async writeBinary(normalizedPath: string, data: ArrayBuffer, options?: unknown): Promise<void> {
-		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-		logger.debug(`[FolderBridge DEBUG writeBinary ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
-
 		logger.debug(`[FolderBridge WRITE_BINARY] path="${normalizedPath}" internalPath=${this.isVaultInternalPath(normalizedPath)}`);
 
 		// Respect defaultCreationVault: when set to 'vault', always create in local vault
 		if (this.defaultCreationVault === 'vault') {
-			logger.debug(`[FolderBridge DEBUG writeBinary] → redirecting to vault (orig().writeBinary)`);
 			await this.orig().writeBinary(normalizedPath, data, options as DataWriteOptions | undefined);
 			void this.onModify?.(normalizedPath).catch(() => {});
 			return;
@@ -1551,12 +1558,8 @@ export class VirtualAdapter {
 	}
 
 	async append(normalizedPath: string, data: string, options?: unknown): Promise<void> {
-		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-		logger.debug(`[FolderBridge DEBUG append ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
-
 		// Respect defaultCreationVault: when set to 'vault', always create in local vault
 		if (this.defaultCreationVault === 'vault') {
-			logger.debug(`[FolderBridge DEBUG append] → redirecting to vault (orig().append)`);
 			await this.orig().append(normalizedPath, data, options as DataWriteOptions | undefined);
 			void this.onModify?.(normalizedPath).catch(() => {});
 			return;
@@ -1830,17 +1833,12 @@ export class VirtualAdapter {
 	// ------------------------------------------------------------------
 
 	async mkdir(normalizedPath: string): Promise<void> {
-		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-		logger.debug(`[FolderBridge DEBUG mkdir ENTRY] path="${normalizedPath}", defaultCreationVault="${this.defaultCreationVault}", enableMountMerging=${this.enableMountMerging}`);
-
 		// Respect defaultCreationVault: when set to 'vault', always create in local vault
 		if (this.defaultCreationVault === 'vault') {
-			logger.debug(`[FolderBridge DEBUG mkdir] → redirecting to vault (orig().mkdir)`);
 			return this.orig().mkdir(normalizedPath);
 		}
 
 		const mount = this.pathMapper.getMountForPath(normalizedPath);
-		logger.debug(`[FolderBridge DEBUG mkdir] mount=${mount ? mount.id + ' (' + mount.virtualPath + ')' : 'none'}`);
 
 		if (mount) {
 			if (mount.readOnly) { this.warnReadOnly(mount); return; }
@@ -2127,105 +2125,108 @@ export class VirtualAdapter {
 			return;
 		}
 
-		const srcMount = this.pathMapper.getMountForPath(normalizedPath);
-		const dstMount = this.pathMapper.getMountForPath(newNormalizedPath);
+		// Resolve which source actually contains the file (priority-based) — same as delete
+		const renameSource = await this.resolveDeleteSource(normalizedPath);
 
-		if (!srcMount && !dstMount) {
-			return this.orig().rename(normalizedPath, newNormalizedPath);
-		}
-
-		if (srcMount && dstMount && srcMount.id === dstMount.id) {
-			// Rename within the same mount
-			if (srcMount.readOnly) { this.warnReadOnly(srcMount); return; }
-			if (this.isPathIgnored(normalizedPath, srcMount) || this.isPathIgnored(newNormalizedPath, dstMount)) {
-				throw new Error(`Folder Bridge: Cannot rename ignored paths`);
-			}
-			const srcReal = this.toReal(normalizedPath, srcMount);
-			const dstReal = this.toReal(newNormalizedPath, dstMount);
-			const webdavRN = this.getWebDAV(srcMount);
-			if (webdavRN) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (webdav) ${this.toServerPath(normalizedPath, srcMount)} → ${this.toServerPath(newNormalizedPath, dstMount)}`); return; }
-				await webdavRN.rename(this.toServerPath(normalizedPath, srcMount), this.toServerPath(newNormalizedPath, dstMount));
-				return;
-			}
-			const s3RN = this.getS3(srcMount);
-			if (s3RN) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (s3) ${this.toServerPath(normalizedPath, srcMount)} → ${this.toServerPath(newNormalizedPath, dstMount)}`); return; }
-				await s3RN.rename(this.toServerPath(normalizedPath, srcMount), this.toServerPath(newNormalizedPath, dstMount));
-				return;
-			}
-			const sftpRN = this.getSFTP(srcMount);
-			if (sftpRN) {
-				if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (sftp) ${this.toServerPath(normalizedPath, srcMount)} → ${this.toServerPath(newNormalizedPath, dstMount)}`); return; }
-				await sftpRN.rename(this.toServerPath(normalizedPath, srcMount), this.toServerPath(newNormalizedPath, dstMount));
-				return;
-			}
-			this.assertAllowed(srcReal);
-			this.assertAllowed(dstReal);
-			this.assertNotReserved(dstReal);
-			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename ${srcReal} → ${dstReal}`); return; }
-			await fs.promises.mkdir(path.dirname(dstReal), { recursive: true });
-
-			// Wait for srcReal to materialise before attempting the rename.
-			// Obsidian's vault.create() may register a TFile in its in-memory
-			// index and focus the inline-title editor *before* adapter.write()
-			// has finished writing the file to disk.  If the user immediately
-			// types a title and blurs, adapter.rename() is called while the
-			// source path hasn't been written yet.  OneDrive cloud-sync operations
-			// can also cause a transient ENOENT on a freshly-written file.
-			const MAX_WAIT_MS = 2000;
-			const POLL_MS = 100;
-			let waited = 0;
-			let srcExists = false;
-			while (waited <= MAX_WAIT_MS) {
-				try {
-					await fs.promises.access(srcReal, fs.constants.F_OK);
-					srcExists = true;
-					break;
-				} catch {
-					if (waited >= MAX_WAIT_MS) break;
-					await new Promise<void>(resolve => setTimeout(resolve, POLL_MS));
-					waited += POLL_MS;
-				}
-			}
-
-			if (!srcExists) {
-				// Check for an idempotent rename: an external tool or a parallel
-				// vault.create() path may have already moved the file.
-				try {
-					await fs.promises.access(dstReal, fs.constants.F_OK);
-					return; // destination already exists – rename is effectively done
-				} catch { /* neither end exists; fall through to throw */ }
-				throw new Error(
-					`Folder Bridge: Cannot rename "${path.basename(srcReal)}" – the source file was not found after ` +
-					`waiting ${MAX_WAIT_MS}ms. ` +
-					`If this file is in OneDrive "Files On Demand", right-click it in Windows Explorer and ` +
-					`choose "Always keep on this device", then try again.`,
-				);
-			}
-
-			try {
-				await fs.promises.rename(srcReal, dstReal);
-			} catch (e) {
-				const err = e as NodeJS.ErrnoException;
-				if (err.code === 'EXDEV') {
-					// Cross-device move (e.g. different drive letters on Windows):
-					// fall back to copy-then-delete so the operation succeeds transparently.
-					// Use fs.promises.cp so that both files and directories are handled.
-					await fs.promises.cp(srcReal, dstReal, { recursive: true });
-					await fs.promises.rm(srcReal, { recursive: true });
-					return;
-				}
-				throw new Error(`Folder Bridge: ${translateFsError(err, 'rename')}`);
-			}
+		if (renameSource.source === 'vault') {
+			// Rename in local vault — delegate to original adapter
+			this.orig().rename(normalizedPath, newNormalizedPath);
+			// Notify Obsidian to update the in-memory vault tree
+			await this.notifyRename(normalizedPath, newNormalizedPath);
 			return;
 		}
 
-		// Cross-mount or cross-adapter rename is not atomic – surface a clear error
-		throw new Error(
-			`Folder Bridge: Cannot move "${normalizedPath}" to "${newNormalizedPath}" across mount boundaries. ` +
-			`Please copy the file manually instead.`
-		);
+		// Rename in mount
+		const mount = renameSource.source;
+		if (mount.readOnly) { this.warnReadOnly(mount); return; }
+		if (this.isPathIgnored(normalizedPath, mount)) {
+			throw new Error(`Folder Bridge: Cannot rename ignored paths`);
+		}
+
+		const srcReal = this.toReal(normalizedPath, mount);
+		const dstReal = this.toReal(newNormalizedPath, mount);
+		const webdavRN = this.getWebDAV(mount);
+		if (webdavRN) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (webdav) ${this.toServerPath(normalizedPath, mount)} → ${this.toServerPath(newNormalizedPath, mount)}`); return; }
+			await webdavRN.rename(this.toServerPath(normalizedPath, mount), this.toServerPath(newNormalizedPath, mount));
+			await this.notifyRename(normalizedPath, newNormalizedPath);
+			return;
+		}
+		const s3RN = this.getS3(mount);
+		if (s3RN) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (s3) ${this.toServerPath(normalizedPath, mount)} → ${this.toServerPath(newNormalizedPath, mount)}`); return; }
+			await s3RN.rename(this.toServerPath(normalizedPath, mount), this.toServerPath(newNormalizedPath, mount));
+			await this.notifyRename(normalizedPath, newNormalizedPath);
+			return;
+		}
+		const sftpRN = this.getSFTP(mount);
+		if (sftpRN) {
+			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (sftp) ${this.toServerPath(normalizedPath, mount)} → ${this.toServerPath(newNormalizedPath, mount)}`); return; }
+			await sftpRN.rename(this.toServerPath(normalizedPath, mount), this.toServerPath(newNormalizedPath, mount));
+			await this.notifyRename(normalizedPath, newNormalizedPath);
+			return;
+		}
+		// Local mount
+		this.assertAllowed(srcReal);
+		this.assertAllowed(dstReal);
+		this.assertNotReserved(dstReal);
+		if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename ${srcReal} → ${dstReal}`); return; }
+		await fs.promises.mkdir(path.dirname(dstReal), { recursive: true });
+
+		// Wait for srcReal to materialise before attempting the rename.
+		// Obsidian's vault.create() may register a TFile in its in-memory
+		// index and focus the inline-title editor *before* adapter.write()
+		// has finished writing the file to disk.  If the user immediately
+		// types a title and blurs, adapter.rename() is called while the
+		// source path hasn't been written yet.  OneDrive cloud-sync operations
+		// can also cause a transient ENOENT on a freshly-written file.
+		const MAX_WAIT_MS = 2000;
+		const POLL_MS = 100;
+		let waited = 0;
+		let srcExists = false;
+		while (waited <= MAX_WAIT_MS) {
+			try {
+				await fs.promises.access(srcReal, fs.constants.F_OK);
+				srcExists = true;
+				break;
+			} catch {
+				if (waited >= MAX_WAIT_MS) break;
+				await new Promise<void>(resolve => setTimeout(resolve, POLL_MS));
+				waited += POLL_MS;
+			}
+		}
+
+		if (!srcExists) {
+			// Check for an idempotent rename: an external tool or a parallel
+			// vault.create() path may have already moved the file.
+			try {
+				await fs.promises.access(dstReal, fs.constants.F_OK);
+				return; // destination already exists – rename is effectively done
+			} catch { /* neither end exists; fall through to throw */ }
+			throw new Error(
+				`Folder Bridge: Cannot rename "${path.basename(srcReal)}" – the source file was not found after ` +
+				`waiting ${MAX_WAIT_MS}ms. ` +
+				`If this file is in OneDrive "Files On Demand", right-click it in Windows Explorer and ` +
+				`choose "Always keep on this device", then try again.`,
+			);
+		}
+
+		try {
+			await fs.promises.rename(srcReal, dstReal);
+		} catch (e) {
+			const err = e as NodeJS.ErrnoException;
+			if (err.code === 'EXDEV') {
+				// Cross-device move (e.g. different drive letters on Windows):
+				// fall back to copy-then-delete so the operation succeeds transparently.
+				// Use fs.promises.cp so that both files and directories are handled.
+				await fs.promises.cp(srcReal, dstReal, { recursive: true });
+				await fs.promises.rm(srcReal, { recursive: true });
+			} else {
+				throw new Error(`Folder Bridge: ${translateFsError(err, 'rename')}`);
+			}
+		}
+		// Notify Obsidian to update the in-memory vault tree
+		await this.notifyRename(normalizedPath, newNormalizedPath);
 	}
 
 	async copy(normalizedPath: string, newNormalizedPath: string): Promise<void> {

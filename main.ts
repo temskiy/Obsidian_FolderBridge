@@ -569,8 +569,6 @@ export default class FolderBridgePlugin extends Plugin {
 		// Initialize plugin state from saved settings
 		setDebugLogging(this.settings.debugLogging);
 		this.virtualAdapter?.setEnableMountMerging(this.settings.enableMountMerging);
-		// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-		logger.debug(`[FolderBridge DEBUG onload] initial defaultCreationVault="${this.settings.defaultCreationVault ?? 'vault'}"`);
 		this.virtualAdapter?.setDefaultCreationVault(this.settings.defaultCreationVault ?? 'vault');
 
 		// Start the localhost streaming server for video/audio in local mounts.
@@ -1791,6 +1789,20 @@ export default class FolderBridgePlugin extends Plugin {
 				const existing = this.app.vault.getAbstractFileByPath(normalizedPath);
 				if (!existing) return;
 				await vault.onChange(existing instanceof TFolder ? 'folder-removed' : 'file-removed', normalizedPath, null, null);
+			},
+			// onRename: fired after a file/folder is renamed via the adapter.
+			//
+			// adapter.rename() performs the physical rename on disk, but Obsidian's
+			// internal vault tree (TFile index) is not automatically updated for
+			// newly-created files that may not be fully registered yet. Firing
+			// 'rename' here tells Obsidian to update the in-memory tree so the
+			// explorer shows the new name immediately.
+			async (oldPath: string, newPath: string) => {
+				const vault = this.app.vault as typeof this.app.vault & VaultInternal;
+				if (typeof vault.onChange !== 'function') return;
+				const existing = this.app.vault.getAbstractFileByPath(oldPath);
+				if (!existing) return;
+				await (vault.onChange as (event: string, path: string, prev: unknown, stat: unknown) => Promise<void>)('rename', oldPath, newPath, null);
 			}
 		);
 
@@ -1802,14 +1814,8 @@ export default class FolderBridgePlugin extends Plugin {
 				if (prop in target) {
 					const val = Reflect.get(target, prop, receiver) as unknown;
 					if (typeof val === 'function') {
-						// REMOVE BEFORE RELEASE: log all adapter method calls
-						const originalFn = val as (...args: unknown[]) => unknown;
-						const wrapped = (...args: unknown[]) => {
-							logger.debug(`[FolderBridge DEBUG adapter call] ${String(prop)}(${args.map(a => typeof a === 'string' ? `"${a}"` : JSON.stringify(a)).join(', ')})`);
-							return originalFn.apply(target, args);
-						};
 						// eslint-disable-next-line @typescript-eslint/no-unsafe-return
-						return wrapped;
+						return (val as () => void).bind(target);
 					}
 					return val;
 				}
@@ -1948,14 +1954,10 @@ export default class FolderBridgePlugin extends Plugin {
 			const nPath = normalizePath(path);
 			const srcMount = this.pathMapper.getMountForPath(nPath);
 
-			// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-			logger.debug(`[FolderBridge DEBUG vault.create] path="${nPath}", srcMount=${srcMount ? srcMount.id + ' (' + srcMount.virtualPath + ')' : 'none'}`);
-			const defaultVault = this.settings.defaultCreationVault ?? 'vault';
-			logger.debug(`[FolderBridge DEBUG vault.create] defaultCreationVault="${defaultVault}"`);
-
 			// If the path belongs to a mount, check if we should redirect to defaultCreationVault
 			let finalPath = nPath;
 			let isVaultRedirect = false;
+			const defaultVault = this.settings.defaultCreationVault ?? 'vault';
 			if (srcMount) {
 				if (defaultVault === 'vault') {
 					// Redirect to local vault — keep the full virtual path as-is
@@ -1963,16 +1965,12 @@ export default class FolderBridgePlugin extends Plugin {
 					// (e.g. virtual "Хранилище 0/Заметки/..." → local "Хранилище 0/Заметки/...")
 					finalPath = nPath;
 					isVaultRedirect = true;
-					logger.debug(`[FolderBridge DEBUG vault.create] → redirecting to vault (full path: "${finalPath}")`);
 				} else if (defaultVault === 'mounts') {
 					// Create in the mount with highest priority — let the existing priority system handle it
 					// No redirect needed, just use the original path
-					logger.debug(`[FolderBridge DEBUG vault.create] → using priority system (defaultCreationVault=mounts)`);
 				}
 				// Legacy: if defaultVault is a specific mount id, redirect to that mount
 				// (kept for backward compatibility)
-			} else {
-				logger.debug(`[FolderBridge DEBUG vault.create] → no mount found, using original path`);
 			}
 
 			// Handle vault redirection (path may be unchanged)
@@ -2085,30 +2083,22 @@ export default class FolderBridgePlugin extends Plugin {
 			const nPath = normalizePath(path);
 			const srcMount = this.pathMapper.getMountForPath(nPath);
 
-			// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-			logger.debug(`[FolderBridge DEBUG vault.createBinary] path="${nPath}", srcMount=${srcMount ? srcMount.id + ' (' + srcMount.virtualPath + ')' : 'none'}`);
-			const defaultVault = this.settings.defaultCreationVault ?? 'vault';
-			logger.debug(`[FolderBridge DEBUG vault.createBinary] defaultCreationVault="${defaultVault}"`);
-
 			// If the path belongs to a mount, check if we should redirect to defaultCreationVault
 			let finalPath = nPath;
 			let isVaultRedirect = false;
+			const defaultVault = this.settings.defaultCreationVault ?? 'vault';
 			if (srcMount) {
 				if (defaultVault === 'vault') {
 					// Redirect to local vault — keep the full virtual path as-is
 					// The local vault has the same folder structure as the virtual path
 					finalPath = nPath;
 					isVaultRedirect = true;
-					logger.debug(`[FolderBridge DEBUG vault.createBinary] → redirecting to vault (full path: "${finalPath}")`);
 				} else if (defaultVault === 'mounts') {
 					// Create in the mount with highest priority — let the existing priority system handle it
 					// No redirect needed, just use the original path
-					logger.debug(`[FolderBridge DEBUG vault.createBinary] → using priority system (defaultCreationVault=mounts)`);
 				}
 				// Legacy: if defaultVault is a specific mount id, redirect to that mount
 				// (kept for backward compatibility)
-			} else {
-				logger.debug(`[FolderBridge DEBUG vault.createBinary] → no mount found, using original path`);
 			}
 
 			if (finalPath !== nPath) {
@@ -4165,8 +4155,6 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 				drop.setValue(this.plugin.settings.defaultCreationVault ?? 'vault');
 				drop.onChange(val => {
 					void (async () => {
-						// REMOVE BEFORE RELEASE: debug logging for defaultCreationVault
-						logger.debug(`[FolderBridge DEBUG settings] defaultCreationVault changed to "${val}"`);
 						this.plugin.settings.defaultCreationVault = val;
 						this.plugin.virtualAdapter?.setDefaultCreationVault(val);
 						await this.plugin.saveSettings();
