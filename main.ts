@@ -124,14 +124,14 @@ export default class FolderBridgePlugin extends Plugin {
 	// Preserve original adapter so we can restore it on unload
 	private originalAdapter: unknown = null;
 	// Preserve original vault.getResourcePath so we can restore it on unload
- 	private originalVaultGetResourcePath: unknown = null;
- 	// Preserve original vault.create / vault.createBinary so we can restore on unload
+	private originalVaultGetResourcePath: unknown = null;
+	// Preserve original vault.create / vault.createBinary so we can restore on unload
 	private originalVaultCreate: unknown = null;
 	private originalVaultCreateBinary: unknown = null;
 	private originalVaultCreateFolder: unknown = null;
- 	// Preserve original vault adapter (FileSystemAdapter) for direct writes to the vault
- 	private originalVaultAdapter: import('obsidian').DataAdapter | null = null;
- 	// Preserve original app.openWithDefaultApp so we can restore it on unload
+	// Preserve original vault adapter (FileSystemAdapter) for direct writes to the vault
+	private originalVaultAdapter: import('obsidian').DataAdapter | null = null;
+	// Preserve original app.openWithDefaultApp so we can restore it on unload
 	private originalOpenWithDefaultApp: unknown = null;
 	statusBarItem: HTMLElement | null = null;
 	explorerObserver: MutationObserver | null = null;
@@ -1856,44 +1856,44 @@ export default class FolderBridgePlugin extends Plugin {
 		// embedded images in mounted folders resolve to the real disk path.
 		this.originalVaultGetResourcePath = vault.getResourcePath?.bind(vault);
 		const pathMapper = this.pathMapper;
-					vault.getResourcePath = (file: TFile): string => {
-				const mount = pathMapper.getMountForPath(file.path);
-				if (mount) {
-					const mountRealPath = pathMapper.toRealPath(file.path, mount);
-					let existsInMount = false;
-					if (!['webdav', 's3', 'sftp'].includes(mount.mountType ?? '')) {
-						try { existsInMount = fs.existsSync(mountRealPath); } catch { /* ignore */ }
-					} else {
-						existsInMount = true; // cloud mounts are authoritative
-					}
-
-					if (existsInMount) {
-						// Файл реально есть в маунте, используем его
-						return this.virtualAdapter?.resolveResourceUrl(mountRealPath)
-							?? tryReadAsDataUri(mountRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
-							?? realPathToResourceUrl(mountRealPath);
-					}
-
-					// [CRITICAL FIX] Файла НЕТ в маунте. Он принадлежит основному хранилищу.
-					// Не используем originalVaultGetResourcePath, так как кэш Obsidian может 
-					// ошибочно связывать этот file.path с маунтом. Вместо этого явно вычисляем 
-					// локальный путь и генерируем URL из него.
-					logger.debug(`[FolderBridge] getResourcePath() forcing local vault path for: "${file.path}"`);
-					const adapter = this.app.vault.adapter as any;
-					const basePath = typeof adapter.getBasePath === 'function' ? adapter.getBasePath() : '';
-					const localRealPath = path.join(basePath, file.path.replace(/\//g, path.sep));
-
-					return this.virtualAdapter?.resolveResourceUrl(localRealPath)
-						?? tryReadAsDataUri(localRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
-						?? realPathToResourceUrl(localRealPath);
+		vault.getResourcePath = (file: TFile): string => {
+			const mount = pathMapper.getMountForPath(file.path);
+			if (mount) {
+				const mountRealPath = pathMapper.toRealPath(file.path, mount);
+				let existsInMount = false;
+				if (!['webdav', 's3', 'sftp'].includes(mount.mountType ?? '')) {
+					try { existsInMount = fs.existsSync(mountRealPath); } catch { /* ignore */ }
+				} else {
+					existsInMount = true; // cloud mounts are authoritative
 				}
 
-				// Fallback для файлов, которые вообще не подпадают под маунты
-				if (typeof this.originalVaultGetResourcePath === 'function') {
-					return (this.originalVaultGetResourcePath as (file: TFile) => string)(file);
+				if (existsInMount) {
+					// Файл реально есть в маунте, используем его
+					return this.virtualAdapter?.resolveResourceUrl(mountRealPath)
+						?? tryReadAsDataUri(mountRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
+						?? realPathToResourceUrl(mountRealPath);
 				}
-				return '';
-			};
+
+				// [CRITICAL FIX] Файла НЕТ в маунте. Он принадлежит основному хранилищу.
+				// Не используем originalVaultGetResourcePath, так как кэш Obsidian может 
+				// ошибочно связывать этот file.path с маунтом. Вместо этого явно вычисляем 
+				// локальный путь и генерируем URL из него.
+				logger.debug(`[FolderBridge] getResourcePath() forcing local vault path for: "${file.path}"`);
+				const adapter = this.app.vault.adapter as any;
+				const basePath = typeof adapter.getBasePath === 'function' ? adapter.getBasePath() : '';
+				const localRealPath = path.join(basePath, file.path.replace(/\//g, path.sep));
+
+				return this.virtualAdapter?.resolveResourceUrl(localRealPath)
+					?? tryReadAsDataUri(localRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
+					?? realPathToResourceUrl(localRealPath);
+			}
+
+			// Fallback для файлов, которые вообще не подпадают под маунты
+			if (typeof this.originalVaultGetResourcePath === 'function') {
+				return (this.originalVaultGetResourcePath as (file: TFile) => string)(file);
+			}
+			return '';
+		};
 
 		// Patch app.openWithDefaultApp() to use the real filesystem path for
 		// mounted files.  Without this, Obsidian constructs a path relative to
@@ -1964,99 +1964,33 @@ export default class FolderBridgePlugin extends Plugin {
 
 		(vault as unknown as PatchedVault).create = async (path: string, data: string, options?: unknown): Promise<TFile | null> => {
 			const nPath = normalizePath(path);
-			const srcMount = this.pathMapper.getMountForPath(nPath);
-
-			// If the path belongs to a mount, check if we should redirect to defaultCreationVault
-			let finalPath = nPath;
-			let isVaultRedirect = false;
 			const defaultVault = this.settings.defaultCreationVault ?? 'vault';
-			if (srcMount) {
-				if (defaultVault === 'vault') {
-					// Redirect to local vault — keep the full virtual path as-is
-					// The local vault has the same folder structure as the virtual path
-					// (e.g. virtual "Хранилище 0/Заметки/..." → local "Хранилище 0/Заметки/...")
-					finalPath = nPath;
-					isVaultRedirect = true;
-				} else if (defaultVault === 'mounts') {
-					// Create in the mount with highest priority — let the existing priority system handle it
-					// No redirect needed, just use the original path
-				}
-				// Legacy: if defaultVault is a specific mount id, redirect to that mount
-				// (kept for backward compatibility)
-			}
 
-			// Handle vault redirection (path may be unchanged)
-			if (isVaultRedirect) {
-				// Create in the redirected path (local vault)
-				// Ensure parent directory exists (Obsidian requires it)
-				const parentDir = finalPath.substring(0, finalPath.lastIndexOf('/'));
-				if (parentDir && !await vault.adapter.exists(parentDir)) {
-					try {
-						await vault.adapter.mkdir(parentDir);
-					} catch {
-						// Directory may already exist or be read-only
-					}
+			// When defaultCreationVault is 'vault', always create in local vault
+			// by delegating to original vault.create() — no mount checks needed.
+			if (defaultVault === 'vault') {
+				try {
+					const result = await (this.originalVaultCreate as OrigVaultCreate)(path, data, options);
+					return result;
+				} catch (e) {
+					// Original vault.create() might reject due to a failed filesystem check
+					// against the vault physical directory (the real file is in the mount).
+					// We swallow the error and fall through to manual registration.
+					logger.debug('[Folder Bridge] vault.create() rejected for virtual path, using manual registration:', e);
 				}
 
-				// For vault redirection, use original adapter directly (not VirtualAdapter)
-				const origAdapter = (this.virtualAdapter as any).orig?.();
-				if (origAdapter) {
-					try {
-						await origAdapter.write(finalPath, data, options as DataWriteOptions | undefined);
-					} catch {
-						// File may already have been written
-					}
-				} else {
-					// Fallback: use vault.adapter (may route through mounts)
-					try {
-						await vault.adapter.write(finalPath, data, options as DataWriteOptions | undefined);
-					} catch {
-						// File may already have been written
-					}
+				// Manual fallback: write the file + register the TFile immediately.
+				try {
+					await vault.adapter.write(nPath, data, options as DataWriteOptions | undefined);
+				} catch {
+					// File may already have been written by the failed vault.create() above.
 				}
-				// Register the file with Obsidian and open it
-				const stat = await vault.adapter.stat(finalPath);
-				if (stat && typeof vault.onChange === 'function') {
-					await vault.onChange('file-created', normalizePath(finalPath), null, stat);
+				const stat = await vault.adapter.stat(nPath);
+				if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(nPath)) {
+					await vault.onChange('file-created', nPath, null, stat);
 				}
-				const created = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
-				if (created instanceof TFile) {
-					// Open the file in a new tab
-					await this.app.workspace.openLinkText(normalizePath(finalPath), normalizePath(finalPath), 'split');
-					return created;
-				}
-				return null;
-			}
-
-			if (finalPath !== nPath) {
-				// Create in the redirected mount path
-				// Ensure parent directory exists (Obsidian requires it)
-				const parentDir = finalPath.substring(0, finalPath.lastIndexOf('/'));
-				if (parentDir && !await vault.adapter.exists(parentDir)) {
-					try {
-						await vault.adapter.mkdir(parentDir);
-					} catch {
-						// Directory may already exist or be read-only
-					}
-				}
-
-				// For mount redirection, use originalVaultCreate
-				const result = await (this.originalVaultCreate as OrigVaultCreate)(finalPath, data, options);
-				if (result) return result;
-
-				// Update tree
-				const existing = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
-				if (existing instanceof TFile) return existing;
-				const stat = await vault.adapter.stat(finalPath);
-				if (stat && typeof vault.onChange === 'function' && !this.app.vault.getAbstractFileByPath(normalizePath(finalPath))) {
-					await vault.onChange('file-created', normalizePath(finalPath), null, stat);
-				}
-				const created = this.app.vault.getAbstractFileByPath(normalizePath(finalPath));
+				const created = this.app.vault.getAbstractFileByPath(nPath);
 				return created instanceof TFile ? created : null;
-			}
-
-			if (!srcMount) {
-				return (this.originalVaultCreate as OrigVaultCreate)(path, data, options);
 			}
 
 			// Let the original vault.create() run — it calls adapter.write() and may
@@ -2383,7 +2317,7 @@ export default class FolderBridgePlugin extends Plugin {
 		// Check if file physically exists in any mount
 		const mounts = this.pathMapper.getMountsForPath(virtualPath);
 		logger.debug(`[FolderBridge] resolveStorageType: found ${mounts.length} mounts for path`);
-		
+
 		for (const mount of mounts) {
 			logger.debug(`[FolderBridge] resolveStorageType: checking mount ${mount.virtualPath}`);
 			if (VirtualAdapter.isCloudMount(mount)) {
@@ -2421,7 +2355,7 @@ export default class FolderBridgePlugin extends Plugin {
 		// If storageType is not provided, determine it
 		const st = storageType ?? await this.resolveStorageType(virtualPath);
 		logger.debug(`[FolderBridge] resolveRealPath: ${virtualPath} -> storageType: ${typeof st === 'string' ? st : st.virtualPath}`);
-		
+
 		if (st === 'vault') {
 			// Get vault base path
 			const vaultAdapter = this.app.vault.adapter;
@@ -2503,437 +2437,437 @@ export default class FolderBridgePlugin extends Plugin {
 	// Copy/Move context menu handler
 	// ------------------------------------------------------------------
 
-		async handleCopyMove(file: TAbstractFile, operation: 'copy' | 'move'): Promise<void> {
-			// Show destination picker
-			const onChoose = async (dest: import('./src/FileTransfer').DestinationOption) => {
-				// Check if destination is reachable
-				if (!dest.reachable) {
-					new Notice(i18n.t('copy.dest.unreachable', { dest: dest.name }));
-					return;
-				}
+	async handleCopyMove(file: TAbstractFile, operation: 'copy' | 'move'): Promise<void> {
+		// Show destination picker
+		const onChoose = async (dest: import('./src/FileTransfer').DestinationOption) => {
+			// Check if destination is reachable
+			if (!dest.reachable) {
+				new Notice(i18n.t('copy.dest.unreachable', { dest: dest.name }));
+				return;
+			}
 
-				// Determine source mount
-				const srcMount = this.pathMapper.getMountForPath(file.path);
+			// Determine source mount
+			const srcMount = this.pathMapper.getMountForPath(file.path);
 
-				// Resolve destination mount
-				let dstMount: MountPoint | null = null;
-				if (dest.id !== 'vault') {
-					dstMount = this.settings.mountPoints.find(m => m.id === dest.id && m.enabled) ?? null;
-				}
+			// Resolve destination mount
+			let dstMount: MountPoint | null = null;
+			if (dest.id !== 'vault') {
+				dstMount = this.settings.mountPoints.find(m => m.id === dest.id && m.enabled) ?? null;
+			}
 
-				// Determine destination storage type based on selected destination (not physical existence)
-				const dstStorageType: 'vault' | MountPoint = dest.id === 'vault' ? 'vault' : (dstMount ?? 'vault');
-				logger.debug(`[FolderBridge] handleCopyMove: dstStorageType from dest.id=${dest.id}: ${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
+			// Determine destination storage type based on selected destination (not physical existence)
+			const dstStorageType: 'vault' | MountPoint = dest.id === 'vault' ? 'vault' : (dstMount ?? 'vault');
+			logger.debug(`[FolderBridge] handleCopyMove: dstStorageType from dest.id=${dest.id}: ${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
 
-				// Calculate source size for large file warning using VirtualAdapter
-				let sizeKB = 0;
-				try {
-					const va = this.virtualAdapter;
-					if (va) {
-						const stat = await va.stat(file.path);
-						if (stat) {
-							if (stat.type === 'folder') {
-								// For folders, calculate total size recursively using VirtualAdapter
-								sizeKB = await this.calculateFolderSize(va, file.path);
-							} else {
-								// For files, use stat.size directly
-								sizeKB = Math.ceil(stat.size / 1024);
-							}
-						}
-					}
-				} catch {
-					// Size calculation failed — proceed with 0
-				}
-
-				// Check large file warning for destination mount
-				if (dstMount && dstMount.enableLargeFileConfirm && sizeKB > (dstMount.largeFileThresholdKB ?? 1024)) {
-					const confirmed = await LargeFileWarningModal.show(
-						this.app,
-						file.name,
-						sizeKB,
-						dstMount,
-						operation as 'create' | 'copy' | 'move',
-						async (mount) => {
-							await this.updateMount(mount.id, mount);
-						},
-					);
-					if (!confirmed) return;
-				}
-
-				// Build destination virtual path (preserve source path structure)
-				const dstVirtualPath = await this.buildDestinationVirtualPath(file, dest, srcMount);
-				logger.debug(`[FolderBridge] handleCopyMove: file=${file.path}, operation=${operation}, dest=${dest.name}`);
-				logger.debug(`[FolderBridge] handleCopyMove: dstVirtualPath=${dstVirtualPath}`);
-
-				// Execute copy or move with conflict handling
-				try {
-					const va = this.virtualAdapter;
-					if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
-
-					// Count total conflicts upfront
-					let totalConflicts = 0;
-					if (file instanceof TFolder) {
-						totalConflicts = await this.countConflicts(va, file.path, dstVirtualPath, dstStorageType);
-					} else {
-						const dstRealPath = await this.resolveRealPath(dstVirtualPath, dstStorageType);
-						try {
-							await fs.promises.access(dstRealPath, fs.constants.F_OK);
-							totalConflicts = 1;
-						} catch {
-							totalConflicts = 0;
-						}
-					}
-					logger.debug(`[FolderBridge] handleCopyMove: totalConflicts=${totalConflicts}`);
-
-					const conflictState = {
-						skipAll: false,
-						overwriteAll: false,
-						totalConflicts,
-						currentConflict: 0,
-					};
-
-					if (operation === 'copy') {
-						await this.recursiveCopy(file.path, dstVirtualPath, file.path, dstVirtualPath, dstStorageType, conflictState);
-						new Notice(i18n.t('copy.copied', { file: file.name, dest: dest.name }));
-					} else {
-						await this.recursiveMove(file.path, dstVirtualPath, file.path, dstVirtualPath, dstStorageType, conflictState);
-						new Notice(i18n.t('move.moved', { file: file.name, dest: dest.name }));
-					}
-
-					// Refresh the vault tree
-					await this.refreshTocMountSources(true);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					new Notice(i18n.t('copy.move.failed', {
-						op: operation === 'copy' ? i18n.t('copy.op') : i18n.t('move.op'),
-						message,
-					}));
-					logger.error(`[FolderBridge] ${operation} failed for "${file.path}":`, error);
-				}
-			};
-
-			new DestinationPickerModal(this.app, this, file, operation, onChoose).open();
-		}
-
-		/**
-		 * Count potential conflicts between source and destination paths.
-		 * Checks physical existence using resolveStorageType and resolveRealPath.
-		 */
-		private async countConflicts(va: VirtualAdapter, srcPath: string, dstPath: string, dstStorageType?: 'vault' | MountPoint): Promise<number> {
-			let count = 0;
+			// Calculate source size for large file warning using VirtualAdapter
+			let sizeKB = 0;
 			try {
-				const stat = await va.stat(srcPath);
-				if (stat && stat.type === 'folder') {
-					const listing = await va.list(srcPath);
-					const allEntries = [...listing.files, ...listing.folders];
-
-					for (const entry of allEntries) {
-						const entrySrcPath = normalizePath(srcPath + '/' + entry);
-						const entryName = entry.split('/').pop()!.split('\\').pop()!;
-						const entryDstPath = normalizePath(dstPath + '/' + entryName);
-
-						const entryStat = await va.stat(entrySrcPath);
-						if (entryStat && entryStat.type === 'folder') {
-							count += await this.countConflicts(va, entrySrcPath, entryDstPath, dstStorageType);
+				const va = this.virtualAdapter;
+				if (va) {
+					const stat = await va.stat(file.path);
+					if (stat) {
+						if (stat.type === 'folder') {
+							// For folders, calculate total size recursively using VirtualAdapter
+							sizeKB = await this.calculateFolderSize(va, file.path);
 						} else {
-							// Check physical existence in destination
-							const entryDstStorageType = dstStorageType;
-							const dstRealPath = await this.resolveRealPath(entryDstPath, entryDstStorageType);
-							try {
-								await fs.promises.access(dstRealPath, fs.constants.F_OK);
-								count++;
-							} catch {
-								// File doesn't physically exist
-							}
+							// For files, use stat.size directly
+							sizeKB = Math.ceil(stat.size / 1024);
 						}
-					}
-				} else {
-					// Check physical existence in destination
-					const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
-					try {
-						await fs.promises.access(dstRealPath, fs.constants.F_OK);
-						count++;
-					} catch {
-						// File doesn't physically exist
 					}
 				}
 			} catch {
-				// Path doesn't exist
-			}
-			return count;
-		}
-
-		/**
-		 * Build the destination virtual path preserving the source path structure.
-		 * Preserves the full path from vault root, prepended with destination mount.
-		 * E.g. "Хранилище 0/файл.pdf" → "_12/Хранилище 0/файл.pdf"
-		 */
-		private async buildDestinationVirtualPath(
-			file: TAbstractFile,
-			dest: import('./src/FileTransfer').DestinationOption,
-			srcMount: MountPoint | undefined,
-		): Promise<string> {
-			logger.debug(`[FolderBridge] buildDestinationVirtualPath: file.path=${file.path}, dest.id=${dest.id}`);
-			const mount = this.settings.mountPoints.find(m => m.id === dest.id && m.enabled);
-
-			if (dest.id === 'vault') {
-				// For vault destination, preserve the full path from vault root
-				logger.debug(`[FolderBridge] buildDestinationVirtualPath: dest is vault, returning file.path as-is: ${file.path}`);
-				return normalizePath(file.path);
+				// Size calculation failed — proceed with 0
 			}
 
-			if (!mount) return normalizePath(file.path);
-
-			// Check if file is already inside the destination mount
-			const destMountVirtual = normalizePath(mount.virtualPath);
-			const fileNormalized = normalizePath(file.path);
-
-			// If file is already inside the destination mount, preserve relative path from mount root
-			if (fileNormalized.startsWith(destMountVirtual + '/') || fileNormalized === destMountVirtual) {
-				const relPath = fileNormalized.startsWith(destMountVirtual + '/')
-					? fileNormalized.slice(destMountVirtual.length + 1)
-					: '';
-				return relPath ? normalizePath(destMountVirtual + '/' + relPath) : destMountVirtual;
+			// Check large file warning for destination mount
+			if (dstMount && dstMount.enableLargeFileConfirm && sizeKB > (dstMount.largeFileThresholdKB ?? 1024)) {
+				const confirmed = await LargeFileWarningModal.show(
+					this.app,
+					file.name,
+					sizeKB,
+					dstMount,
+					operation as 'create' | 'copy' | 'move',
+					async (mount) => {
+						await this.updateMount(mount.id, mount);
+					},
+				);
+				if (!confirmed) return;
 			}
 
-			// File is outside the destination mount — preserve full path from vault root
-			return normalizePath(destMountVirtual + '/' + file.path);
-		}
+			// Build destination virtual path (preserve source path structure)
+			const dstVirtualPath = await this.buildDestinationVirtualPath(file, dest, srcMount);
+			logger.debug(`[FolderBridge] handleCopyMove: file=${file.path}, operation=${operation}, dest=${dest.name}`);
+			logger.debug(`[FolderBridge] handleCopyMove: dstVirtualPath=${dstVirtualPath}`);
 
-		/**
-		 * Recursively copy a file or folder from source to destination.
-		 * Uses relative paths to avoid duplication in recursive calls.
-		 * Handles conflicts when destination already exists.
-		 */
-		private async recursiveCopy(
-			srcPath: string,
-			dstPath: string,
-			rootSrcPath: string,
-			rootDstPath: string,
-			dstStorageType: 'vault' | MountPoint,
-			conflictState: { skipAll: boolean; overwriteAll: boolean; totalConflicts: number; currentConflict: number },
-		): Promise<void> {
-			const va = this.virtualAdapter;
-			if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+			// Execute copy or move with conflict handling
+			try {
+				const va = this.virtualAdapter;
+				if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
 
-			// Resolve storage types and real paths for source and destination
-			const srcStorageType = await this.resolveStorageType(srcPath);
-			const srcRealPath = await this.resolveRealPath(srcPath);
-			const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
-
-			logger.debug(`[FolderBridge] recursiveCopy: srcPath=${srcPath}, dstPath=${dstPath}`);
-			logger.debug(`[FolderBridge] recursiveCopy: srcStorageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}, dstStorageType=${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
-			logger.debug(`[FolderBridge] recursiveCopy: srcRealPath=${srcRealPath}, dstRealPath=${dstRealPath}`);
-
-			// Check if destination exists and user wants to skip/overwrite
-			if (!conflictState.skipAll) {
-				let dstExists = false;
-				try {
-					logger.debug(`[FolderBridge] recursiveCopy: checking if dst exists: ${dstRealPath}`);
-					await fs.promises.access(dstRealPath, fs.constants.F_OK);
-					dstExists = true;
-					logger.debug(`[FolderBridge] recursiveCopy: dst EXISTS`);
-				} catch {
-					dstExists = false;
-					logger.debug(`[FolderBridge] recursiveCopy: dst does NOT exist`);
-				}
-
-				if (dstExists) {
-					conflictState.currentConflict++;
-					logger.debug(`[FolderBridge] recursiveCopy: CONFLICT #${conflictState.currentConflict}/${conflictState.totalConflicts}, showing dialog`);
-					if (!conflictState.overwriteAll) {
-						const resolution = await ConflictResolutionModal.show(
-							this.app,
-							dstPath.split('/').pop()!,
-							'copy',
-							conflictState.totalConflicts,
-							conflictState.currentConflict - 1,
-						);
-
-						if (resolution === 'skip' || resolution === 'skipAll') {
-							if (resolution === 'skipAll') conflictState.skipAll = true;
-							logger.debug(`[FolderBridge] recursiveCopy: user chose ${resolution}, skipping`);
-							return;
-						}
-						if (resolution === 'overwriteAll') conflictState.overwriteAll = true;
-						logger.debug(`[FolderBridge] recursiveCopy: user chose ${resolution}, continuing`);
+				// Count total conflicts upfront
+				let totalConflicts = 0;
+				if (file instanceof TFolder) {
+					totalConflicts = await this.countConflicts(va, file.path, dstVirtualPath, dstStorageType);
+				} else {
+					const dstRealPath = await this.resolveRealPath(dstVirtualPath, dstStorageType);
+					try {
+						await fs.promises.access(dstRealPath, fs.constants.F_OK);
+						totalConflicts = 1;
+					} catch {
+						totalConflicts = 0;
 					}
 				}
+				logger.debug(`[FolderBridge] handleCopyMove: totalConflicts=${totalConflicts}`);
+
+				const conflictState = {
+					skipAll: false,
+					overwriteAll: false,
+					totalConflicts,
+					currentConflict: 0,
+				};
+
+				if (operation === 'copy') {
+					await this.recursiveCopy(file.path, dstVirtualPath, file.path, dstVirtualPath, dstStorageType, conflictState);
+					new Notice(i18n.t('copy.copied', { file: file.name, dest: dest.name }));
+				} else {
+					await this.recursiveMove(file.path, dstVirtualPath, file.path, dstVirtualPath, dstStorageType, conflictState);
+					new Notice(i18n.t('move.moved', { file: file.name, dest: dest.name }));
+				}
+
+				// Refresh the vault tree
+				await this.refreshTocMountSources(true);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				new Notice(i18n.t('copy.move.failed', {
+					op: operation === 'copy' ? i18n.t('copy.op') : i18n.t('move.op'),
+					message,
+				}));
+				logger.error(`[FolderBridge] ${operation} failed for "${file.path}":`, error);
 			}
+		};
 
-			// Use stat to distinguish files from folders
+		new DestinationPickerModal(this.app, this, file, operation, onChoose).open();
+	}
+
+	/**
+	 * Count potential conflicts between source and destination paths.
+	 * Checks physical existence using resolveStorageType and resolveRealPath.
+	 */
+	private async countConflicts(va: VirtualAdapter, srcPath: string, dstPath: string, dstStorageType?: 'vault' | MountPoint): Promise<number> {
+		let count = 0;
+		try {
 			const stat = await va.stat(srcPath);
-			logger.debug(`[FolderBridge] recursiveCopy: src is ${stat?.type}`);
 			if (stat && stat.type === 'folder') {
-				// Create destination folder
-				logger.debug(`[FolderBridge] recursiveCopy: creating folder: ${dstRealPath}`);
-				await fs.promises.mkdir(dstRealPath, { recursive: true });
-
-				// List contents and copy each item
 				const listing = await va.list(srcPath);
 				const allEntries = [...listing.files, ...listing.folders];
-				logger.debug(`[FolderBridge] recursiveCopy: folder has ${allEntries.length} entries`);
 
 				for (const entry of allEntries) {
-					// Extract just the filename from entry
+					const entrySrcPath = normalizePath(srcPath + '/' + entry);
 					const entryName = entry.split('/').pop()!.split('\\').pop()!;
-					const entrySrcPath = normalizePath(srcPath + '/' + entryName);
-					// Calculate relative path from root source to get the relative destination
-					const relPath = entrySrcPath.slice(rootSrcPath.length + 1);
-					const entryDstPath = normalizePath(rootDstPath + '/' + relPath);
-					logger.debug(`[FolderBridge] recursiveCopy: processing entry: ${entryName} -> ${entryDstPath}`);
-					await this.recursiveCopy(entrySrcPath, entryDstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
+					const entryDstPath = normalizePath(dstPath + '/' + entryName);
+
+					const entryStat = await va.stat(entrySrcPath);
+					if (entryStat && entryStat.type === 'folder') {
+						count += await this.countConflicts(va, entrySrcPath, entryDstPath, dstStorageType);
+					} else {
+						// Check physical existence in destination
+						const entryDstStorageType = dstStorageType;
+						const dstRealPath = await this.resolveRealPath(entryDstPath, entryDstStorageType);
+						try {
+							await fs.promises.access(dstRealPath, fs.constants.F_OK);
+							count++;
+						} catch {
+							// File doesn't physically exist
+						}
+					}
 				}
 			} else {
-				// Copy file based on storage types
-				logger.debug(`[FolderBridge] recursiveCopy: copying file, srcType===dstType: ${srcStorageType === dstStorageType}`);
-				if (srcStorageType === dstStorageType) {
-					// Same storage type — use appropriate copy method
-					logger.debug(`[FolderBridge] recursiveCopy: using same-type copy`);
-					if (srcStorageType === 'vault') {
-						// Both in vault — use fs.copyFile with real paths
-						// (va.copy() would try to route through mount which may not have the file)
-						logger.debug(`[FolderBridge] recursiveCopy: vault->vault using fs.copyFile`);
-						logger.debug(`[FolderBridge] recursiveCopy: srcRealPath=${srcRealPath}`);
-						logger.debug(`[FolderBridge] recursiveCopy: dstRealPath=${dstRealPath}`);
-						await fs.promises.copyFile(srcRealPath, dstRealPath);
-					} else {
-						// Same mount — use native copy
-						logger.debug(`[FolderBridge] recursiveCopy: mount->mount using va.copy`);
-						await va.copy(srcPath, dstPath);
-					}
-				} else {
-					// Different storage types — read from source, write to destination
-					logger.debug(`[FolderBridge] recursiveCopy: using read/write (different storage types)`);
-					let content: Buffer;
-					if (srcStorageType === 'vault') {
-						logger.debug(`[FolderBridge] recursiveCopy: reading from vault`);
-						const vaultAdapter = this.app.vault.adapter;
-						content = Buffer.from(await vaultAdapter.read(srcPath));
-					} else {
-						logger.debug(`[FolderBridge] recursiveCopy: reading from mount: ${srcRealPath}`);
-						content = await fs.promises.readFile(srcRealPath);
-					}
+				// Check physical existence in destination
+				const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+				try {
+					await fs.promises.access(dstRealPath, fs.constants.F_OK);
+					count++;
+				} catch {
+					// File doesn't physically exist
+				}
+			}
+		} catch {
+			// Path doesn't exist
+		}
+		return count;
+	}
 
-					if (dstStorageType === 'vault') {
-						logger.debug(`[FolderBridge] recursiveCopy: writing to vault: ${dstRealPath}`);
-						// Use fs.promises.writeFile directly — va.writeBinary() would select by priority (mount wins)
-						await fs.promises.mkdir(path.dirname(dstRealPath), { recursive: true });
-						await fs.promises.writeFile(dstRealPath, content);
-					} else {
-						logger.debug(`[FolderBridge] recursiveCopy: writing to mount: ${dstRealPath}`);
-						await fs.promises.mkdir(path.dirname(dstRealPath), { recursive: true });
-						await fs.promises.writeFile(dstRealPath, content);
+	/**
+	 * Build the destination virtual path preserving the source path structure.
+	 * Preserves the full path from vault root, prepended with destination mount.
+	 * E.g. "Хранилище 0/файл.pdf" → "_12/Хранилище 0/файл.pdf"
+	 */
+	private async buildDestinationVirtualPath(
+		file: TAbstractFile,
+		dest: import('./src/FileTransfer').DestinationOption,
+		srcMount: MountPoint | undefined,
+	): Promise<string> {
+		logger.debug(`[FolderBridge] buildDestinationVirtualPath: file.path=${file.path}, dest.id=${dest.id}`);
+		const mount = this.settings.mountPoints.find(m => m.id === dest.id && m.enabled);
+
+		if (dest.id === 'vault') {
+			// For vault destination, preserve the full path from vault root
+			logger.debug(`[FolderBridge] buildDestinationVirtualPath: dest is vault, returning file.path as-is: ${file.path}`);
+			return normalizePath(file.path);
+		}
+
+		if (!mount) return normalizePath(file.path);
+
+		// Check if file is already inside the destination mount
+		const destMountVirtual = normalizePath(mount.virtualPath);
+		const fileNormalized = normalizePath(file.path);
+
+		// If file is already inside the destination mount, preserve relative path from mount root
+		if (fileNormalized.startsWith(destMountVirtual + '/') || fileNormalized === destMountVirtual) {
+			const relPath = fileNormalized.startsWith(destMountVirtual + '/')
+				? fileNormalized.slice(destMountVirtual.length + 1)
+				: '';
+			return relPath ? normalizePath(destMountVirtual + '/' + relPath) : destMountVirtual;
+		}
+
+		// File is outside the destination mount — preserve full path from vault root
+		return normalizePath(destMountVirtual + '/' + file.path);
+	}
+
+	/**
+	 * Recursively copy a file or folder from source to destination.
+	 * Uses relative paths to avoid duplication in recursive calls.
+	 * Handles conflicts when destination already exists.
+	 */
+	private async recursiveCopy(
+		srcPath: string,
+		dstPath: string,
+		rootSrcPath: string,
+		rootDstPath: string,
+		dstStorageType: 'vault' | MountPoint,
+		conflictState: { skipAll: boolean; overwriteAll: boolean; totalConflicts: number; currentConflict: number },
+	): Promise<void> {
+		const va = this.virtualAdapter;
+		if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+
+		// Resolve storage types and real paths for source and destination
+		const srcStorageType = await this.resolveStorageType(srcPath);
+		const srcRealPath = await this.resolveRealPath(srcPath);
+		const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+
+		logger.debug(`[FolderBridge] recursiveCopy: srcPath=${srcPath}, dstPath=${dstPath}`);
+		logger.debug(`[FolderBridge] recursiveCopy: srcStorageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}, dstStorageType=${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
+		logger.debug(`[FolderBridge] recursiveCopy: srcRealPath=${srcRealPath}, dstRealPath=${dstRealPath}`);
+
+		// Check if destination exists and user wants to skip/overwrite
+		if (!conflictState.skipAll) {
+			let dstExists = false;
+			try {
+				logger.debug(`[FolderBridge] recursiveCopy: checking if dst exists: ${dstRealPath}`);
+				await fs.promises.access(dstRealPath, fs.constants.F_OK);
+				dstExists = true;
+				logger.debug(`[FolderBridge] recursiveCopy: dst EXISTS`);
+			} catch {
+				dstExists = false;
+				logger.debug(`[FolderBridge] recursiveCopy: dst does NOT exist`);
+			}
+
+			if (dstExists) {
+				conflictState.currentConflict++;
+				logger.debug(`[FolderBridge] recursiveCopy: CONFLICT #${conflictState.currentConflict}/${conflictState.totalConflicts}, showing dialog`);
+				if (!conflictState.overwriteAll) {
+					const resolution = await ConflictResolutionModal.show(
+						this.app,
+						dstPath.split('/').pop()!,
+						'copy',
+						conflictState.totalConflicts,
+						conflictState.currentConflict - 1,
+					);
+
+					if (resolution === 'skip' || resolution === 'skipAll') {
+						if (resolution === 'skipAll') conflictState.skipAll = true;
+						logger.debug(`[FolderBridge] recursiveCopy: user chose ${resolution}, skipping`);
+						return;
 					}
+					if (resolution === 'overwriteAll') conflictState.overwriteAll = true;
+					logger.debug(`[FolderBridge] recursiveCopy: user chose ${resolution}, continuing`);
 				}
 			}
 		}
 
-		/**
-		 * Recursively move a file or folder from source to destination.
-		 * Uses relative paths to avoid duplication in recursive calls.
-		 * Handles conflicts when destination already exists.
-		 */
-		private async recursiveMove(
-			srcPath: string,
-			dstPath: string,
-			rootSrcPath: string,
-			rootDstPath: string,
-			dstStorageType: 'vault' | MountPoint,
-			conflictState: { skipAll: boolean; overwriteAll: boolean; totalConflicts: number; currentConflict: number },
-		): Promise<void> {
-			const va = this.virtualAdapter;
-			if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+		// Use stat to distinguish files from folders
+		const stat = await va.stat(srcPath);
+		logger.debug(`[FolderBridge] recursiveCopy: src is ${stat?.type}`);
+		if (stat && stat.type === 'folder') {
+			// Create destination folder
+			logger.debug(`[FolderBridge] recursiveCopy: creating folder: ${dstRealPath}`);
+			await fs.promises.mkdir(dstRealPath, { recursive: true });
 
-			// Resolve storage types and real paths for source and destination
-			const srcStorageType = await this.resolveStorageType(srcPath);
-			const srcRealPath = await this.resolveRealPath(srcPath);
-			const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+			// List contents and copy each item
+			const listing = await va.list(srcPath);
+			const allEntries = [...listing.files, ...listing.folders];
+			logger.debug(`[FolderBridge] recursiveCopy: folder has ${allEntries.length} entries`);
 
-			logger.debug(`[FolderBridge] recursiveMove: srcPath=${srcPath}, dstPath=${dstPath}`);
-			logger.debug(`[FolderBridge] recursiveMove: srcStorageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}, dstStorageType=${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
-
-			// Check if destination exists and user wants to skip/overwrite
-			if (!conflictState.skipAll) {
-				let dstExists = false;
-				try {
-					logger.debug(`[FolderBridge] recursiveMove: checking if dst exists: ${dstRealPath}`);
-					await fs.promises.access(dstRealPath, fs.constants.F_OK);
-					dstExists = true;
-					logger.debug(`[FolderBridge] recursiveMove: dst EXISTS`);
-				} catch {
-					dstExists = false;
-					logger.debug(`[FolderBridge] recursiveMove: dst does NOT exist`);
+			for (const entry of allEntries) {
+				// Extract just the filename from entry
+				const entryName = entry.split('/').pop()!.split('\\').pop()!;
+				const entrySrcPath = normalizePath(srcPath + '/' + entryName);
+				// Calculate relative path from root source to get the relative destination
+				const relPath = entrySrcPath.slice(rootSrcPath.length + 1);
+				const entryDstPath = normalizePath(rootDstPath + '/' + relPath);
+				logger.debug(`[FolderBridge] recursiveCopy: processing entry: ${entryName} -> ${entryDstPath}`);
+				await this.recursiveCopy(entrySrcPath, entryDstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
+			}
+		} else {
+			// Copy file based on storage types
+			logger.debug(`[FolderBridge] recursiveCopy: copying file, srcType===dstType: ${srcStorageType === dstStorageType}`);
+			if (srcStorageType === dstStorageType) {
+				// Same storage type — use appropriate copy method
+				logger.debug(`[FolderBridge] recursiveCopy: using same-type copy`);
+				if (srcStorageType === 'vault') {
+					// Both in vault — use fs.copyFile with real paths
+					// (va.copy() would try to route through mount which may not have the file)
+					logger.debug(`[FolderBridge] recursiveCopy: vault->vault using fs.copyFile`);
+					logger.debug(`[FolderBridge] recursiveCopy: srcRealPath=${srcRealPath}`);
+					logger.debug(`[FolderBridge] recursiveCopy: dstRealPath=${dstRealPath}`);
+					await fs.promises.copyFile(srcRealPath, dstRealPath);
+				} else {
+					// Same mount — use native copy
+					logger.debug(`[FolderBridge] recursiveCopy: mount->mount using va.copy`);
+					await va.copy(srcPath, dstPath);
+				}
+			} else {
+				// Different storage types — read from source, write to destination
+				logger.debug(`[FolderBridge] recursiveCopy: using read/write (different storage types)`);
+				let content: Buffer;
+				if (srcStorageType === 'vault') {
+					logger.debug(`[FolderBridge] recursiveCopy: reading from vault`);
+					const vaultAdapter = this.app.vault.adapter;
+					content = Buffer.from(await vaultAdapter.read(srcPath));
+				} else {
+					logger.debug(`[FolderBridge] recursiveCopy: reading from mount: ${srcRealPath}`);
+					content = await fs.promises.readFile(srcRealPath);
 				}
 
-				if (dstExists) {
-					conflictState.currentConflict++;
-					logger.debug(`[FolderBridge] recursiveMove: CONFLICT #${conflictState.currentConflict}/${conflictState.totalConflicts}, showing dialog`);
-					if (!conflictState.overwriteAll) {
-						const resolution = await ConflictResolutionModal.show(
-							this.app,
-							dstPath.split('/').pop()!,
-							'move',
-							conflictState.totalConflicts,
-							conflictState.currentConflict - 1,
-						);
-
-						if (resolution === 'skip' || resolution === 'skipAll') {
-							if (resolution === 'skipAll') conflictState.skipAll = true;
-							logger.debug(`[FolderBridge] recursiveMove: user chose ${resolution}, skipping`);
-							return;
-						}
-						if (resolution === 'overwriteAll') conflictState.overwriteAll = true;
-						logger.debug(`[FolderBridge] recursiveMove: user chose ${resolution}, continuing`);
-					}
+				if (dstStorageType === 'vault') {
+					logger.debug(`[FolderBridge] recursiveCopy: writing to vault: ${dstRealPath}`);
+					// Use fs.promises.writeFile directly — va.writeBinary() would select by priority (mount wins)
+					await fs.promises.mkdir(path.dirname(dstRealPath), { recursive: true });
+					await fs.promises.writeFile(dstRealPath, content);
+				} else {
+					logger.debug(`[FolderBridge] recursiveCopy: writing to mount: ${dstRealPath}`);
+					await fs.promises.mkdir(path.dirname(dstRealPath), { recursive: true });
+					await fs.promises.writeFile(dstRealPath, content);
 				}
 			}
+		}
+	}
 
-			// Use stat to distinguish files from folders
-			const stat = await va.stat(srcPath);
-			logger.debug(`[FolderBridge] recursiveMove: src is ${stat?.type}`);
-			if (stat && stat.type === 'folder') {
-				// For folders, try atomic rename first (same storage type)
-				logger.debug(`[FolderBridge] recursiveMove: same storage type: ${srcStorageType === dstStorageType}`);
-				if (srcStorageType === dstStorageType && srcStorageType !== 'vault') {
-					// Same mount — use atomic rename
-					logger.debug(`[FolderBridge] recursiveMove: using atomic rename for folder`);
-					await va.rename(srcPath, dstPath);
-					return;
+	/**
+	 * Recursively move a file or folder from source to destination.
+	 * Uses relative paths to avoid duplication in recursive calls.
+	 * Handles conflicts when destination already exists.
+	 */
+	private async recursiveMove(
+		srcPath: string,
+		dstPath: string,
+		rootSrcPath: string,
+		rootDstPath: string,
+		dstStorageType: 'vault' | MountPoint,
+		conflictState: { skipAll: boolean; overwriteAll: boolean; totalConflicts: number; currentConflict: number },
+	): Promise<void> {
+		const va = this.virtualAdapter;
+		if (!va) throw new Error('Folder Bridge: VirtualAdapter not initialized.');
+
+		// Resolve storage types and real paths for source and destination
+		const srcStorageType = await this.resolveStorageType(srcPath);
+		const srcRealPath = await this.resolveRealPath(srcPath);
+		const dstRealPath = await this.resolveRealPath(dstPath, dstStorageType);
+
+		logger.debug(`[FolderBridge] recursiveMove: srcPath=${srcPath}, dstPath=${dstPath}`);
+		logger.debug(`[FolderBridge] recursiveMove: srcStorageType=${typeof srcStorageType === 'string' ? srcStorageType : srcStorageType.virtualPath}, dstStorageType=${typeof dstStorageType === 'string' ? dstStorageType : dstStorageType.virtualPath}`);
+
+		// Check if destination exists and user wants to skip/overwrite
+		if (!conflictState.skipAll) {
+			let dstExists = false;
+			try {
+				logger.debug(`[FolderBridge] recursiveMove: checking if dst exists: ${dstRealPath}`);
+				await fs.promises.access(dstRealPath, fs.constants.F_OK);
+				dstExists = true;
+				logger.debug(`[FolderBridge] recursiveMove: dst EXISTS`);
+			} catch {
+				dstExists = false;
+				logger.debug(`[FolderBridge] recursiveMove: dst does NOT exist`);
+			}
+
+			if (dstExists) {
+				conflictState.currentConflict++;
+				logger.debug(`[FolderBridge] recursiveMove: CONFLICT #${conflictState.currentConflict}/${conflictState.totalConflicts}, showing dialog`);
+				if (!conflictState.overwriteAll) {
+					const resolution = await ConflictResolutionModal.show(
+						this.app,
+						dstPath.split('/').pop()!,
+						'move',
+						conflictState.totalConflicts,
+						conflictState.currentConflict - 1,
+					);
+
+					if (resolution === 'skip' || resolution === 'skipAll') {
+						if (resolution === 'skipAll') conflictState.skipAll = true;
+						logger.debug(`[FolderBridge] recursiveMove: user chose ${resolution}, skipping`);
+						return;
+					}
+					if (resolution === 'overwriteAll') conflictState.overwriteAll = true;
+					logger.debug(`[FolderBridge] recursiveMove: user chose ${resolution}, continuing`);
 				}
+			}
+		}
 
-				// Different storage types or vault involved — copy then delete
-				logger.debug(`[FolderBridge] recursiveMove: using copy+delete for folder`);
+		// Use stat to distinguish files from folders
+		const stat = await va.stat(srcPath);
+		logger.debug(`[FolderBridge] recursiveMove: src is ${stat?.type}`);
+		if (stat && stat.type === 'folder') {
+			// For folders, try atomic rename first (same storage type)
+			logger.debug(`[FolderBridge] recursiveMove: same storage type: ${srcStorageType === dstStorageType}`);
+			if (srcStorageType === dstStorageType && srcStorageType !== 'vault') {
+				// Same mount — use atomic rename
+				logger.debug(`[FolderBridge] recursiveMove: using atomic rename for folder`);
+				await va.rename(srcPath, dstPath);
+				return;
+			}
+
+			// Different storage types or vault involved — copy then delete
+			logger.debug(`[FolderBridge] recursiveMove: using copy+delete for folder`);
+			await this.recursiveCopy(srcPath, dstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
+			await this.recursiveDelete(srcPath, srcStorageType);
+		} else {
+			// Move file
+			logger.debug(`[FolderBridge] recursiveMove: moving file, same storage type: ${srcStorageType === dstStorageType}`);
+			if (srcStorageType === dstStorageType) {
+				// Same storage type — use appropriate rename method
+				logger.debug(`[FolderBridge] recursiveMove: using same-type rename`);
+				if (srcStorageType === 'vault') {
+					// Both in vault — use fs.rename with real paths
+					logger.debug(`[FolderBridge] recursiveMove: vault->vault using fs.rename`);
+					await fs.promises.rename(srcRealPath, dstRealPath);
+				} else {
+					// Same mount — use atomic rename
+					logger.debug(`[FolderBridge] recursiveMove: mount->mount using va.rename`);
+					await va.rename(srcPath, dstPath);
+				}
+			} else {
+				// Different storage types — copy then delete
+				logger.debug(`[FolderBridge] recursiveMove: using copy+delete for file`);
 				await this.recursiveCopy(srcPath, dstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
 				await this.recursiveDelete(srcPath, srcStorageType);
-			} else {
-				// Move file
-				logger.debug(`[FolderBridge] recursiveMove: moving file, same storage type: ${srcStorageType === dstStorageType}`);
-				if (srcStorageType === dstStorageType) {
-					// Same storage type — use appropriate rename method
-					logger.debug(`[FolderBridge] recursiveMove: using same-type rename`);
-					if (srcStorageType === 'vault') {
-						// Both in vault — use fs.rename with real paths
-						logger.debug(`[FolderBridge] recursiveMove: vault->vault using fs.rename`);
-						await fs.promises.rename(srcRealPath, dstRealPath);
-					} else {
-						// Same mount — use atomic rename
-						logger.debug(`[FolderBridge] recursiveMove: mount->mount using va.rename`);
-						await va.rename(srcPath, dstPath);
-					}
-				} else {
-					// Different storage types — copy then delete
-					logger.debug(`[FolderBridge] recursiveMove: using copy+delete for file`);
-					await this.recursiveCopy(srcPath, dstPath, rootSrcPath, rootDstPath, dstStorageType, conflictState);
-					await this.recursiveDelete(srcPath, srcStorageType);
-				}
 			}
 		}
+	}
 
-		/**
-		 * Recursively delete a file or folder.
-		 * Uses the resolved storage type to delete from the correct location.
-		 */
+	/**
+	 * Recursively delete a file or folder.
+	 * Uses the resolved storage type to delete from the correct location.
+	 */
 	private async recursiveDelete(deletePath: string, srcStorageType: 'vault' | MountPoint): Promise<void> {
 		const va = this.virtualAdapter;
 		if (!va) return;
@@ -2995,7 +2929,7 @@ export default class FolderBridgePlugin extends Plugin {
 		}
 	}
 
-		async removeMount(id: string): Promise<void> {
+	async removeMount(id: string): Promise<void> {
 		const idx = this.persistedMountPoints.findIndex(m => m.id === id);
 		if (idx === -1) {
 			const managedIndex = this.getManagedTocIndex(id);
@@ -3588,62 +3522,62 @@ export default class FolderBridgePlugin extends Plugin {
 		logger.warn(`[FolderBridge] notifyVaultMountRemoved: virtualPath="${mount.virtualPath}", nPath="${nPath}"`);
 
 		const mountFolder = this.app.vault.getAbstractFileByPath(nPath);
-			if (!mountFolder || !(mountFolder instanceof TFolder)) return;
+		if (!mountFolder || !(mountFolder instanceof TFolder)) return;
 
-			const notice = new Notice(i18n.t('status.removing', { path: mount.virtualPath }), 0);
-			let removedCount = 0;
+		const notice = new Notice(i18n.t('status.removing', { path: mount.virtualPath }), 0);
+		let removedCount = 0;
 
-			// [SMART FIX] Получаем доступ к оригинальному адаптеру основного хранилища
-			const origAdapter = (this.app.vault.adapter as any).orig?.() || (this as any).originalAdapter;
-			
-			const collectAndRemove = async (folder: TFolder): Promise<void> => {
-				for (const child of [...folder.children]) {
-					if (!isCurrent()) return;
-					
-					// Проверяем, существует ли этот файл/папка в ОСНОВНОМ хранилище
-					let existsInPrimary = false;
-					try {
-						existsInPrimary = await origAdapter.exists(child.path);
-					} catch (e) {
-						logger.debug(`Folder Bridge: Error checking primary existence for ${child.path}`, e);
-					}
-					
-					if (!existsInPrimary) {
-						// Файла нет в основном хранилище, значит он добавлен маунтом. Безопасно удаляем из индекса.
-						try {
-							if (child instanceof TFolder) {
-								await collectAndRemove(child); // Сначала рекурсивно чистим содержимое
-								await vault.onChange('folder-removed', child.path, null, null);
-							} else {
-								await vault.onChange('file-removed', child.path, null, null);
-							}
-							removedCount++;
-						} catch (e) {
-							logger.debug('Folder Bridge: Failed to remove item from vault view', e);
-						}
-					} else if (child instanceof TFolder) {
-						// Файл/папка есть в основном хранилище, не удаляем её.
-						// Но рекурсивно проверяем её содержимое, вдруг там есть файлы только из маунта.
-						await collectAndRemove(child);
-					}
+		// [SMART FIX] Получаем доступ к оригинальному адаптеру основного хранилища
+		const origAdapter = (this.app.vault.adapter as any).orig?.() || (this as any).originalAdapter;
+
+		const collectAndRemove = async (folder: TFolder): Promise<void> => {
+			for (const child of [...folder.children]) {
+				if (!isCurrent()) return;
+
+				// Проверяем, существует ли этот файл/папка в ОСНОВНОМ хранилище
+				let existsInPrimary = false;
+				try {
+					existsInPrimary = await origAdapter.exists(child.path);
+				} catch (e) {
+					logger.debug(`Folder Bridge: Error checking primary existence for ${child.path}`, e);
 				}
-			};
 
-			try {
-				await collectAndRemove(mountFolder);
-				
-				if (!isCurrent() || this.app.vault.getAbstractFileByPath(nPath) !== mountFolder) return;
-				
-				if (isCurrent()) new Notice(i18n.t('status.unmounted.cleaned', { path: mount.virtualPath, count: removedCount }));
-			} finally {
-				notice.hide();
+				if (!existsInPrimary) {
+					// Файла нет в основном хранилище, значит он добавлен маунтом. Безопасно удаляем из индекса.
+					try {
+						if (child instanceof TFolder) {
+							await collectAndRemove(child); // Сначала рекурсивно чистим содержимое
+							await vault.onChange('folder-removed', child.path, null, null);
+						} else {
+							await vault.onChange('file-removed', child.path, null, null);
+						}
+						removedCount++;
+					} catch (e) {
+						logger.debug('Folder Bridge: Failed to remove item from vault view', e);
+					}
+				} else if (child instanceof TFolder) {
+					// Файл/папка есть в основном хранилище, не удаляем её.
+					// Но рекурсивно проверяем её содержимое, вдруг там есть файлы только из маунта.
+					await collectAndRemove(child);
+				}
 			}
+		};
 
-			// Refresh file-explorer highlights after mount removal
-			this.scheduleExplorerWork(() => {
-				if (isCurrent()) this.highlightMountedInExplorer();
-			}, 200);
+		try {
+			await collectAndRemove(mountFolder);
+
+			if (!isCurrent() || this.app.vault.getAbstractFileByPath(nPath) !== mountFolder) return;
+
+			if (isCurrent()) new Notice(i18n.t('status.unmounted.cleaned', { path: mount.virtualPath, count: removedCount }));
+		} finally {
+			notice.hide();
 		}
+
+		// Refresh file-explorer highlights after mount removal
+		this.scheduleExplorerWork(() => {
+			if (isCurrent()) this.highlightMountedInExplorer();
+		}, 200);
+	}
 	// ------------------------------------------------------------------
 
 	/**
@@ -4194,7 +4128,7 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 			});
 		}
 
-// Transfer & Creation settings
+		// Transfer & Creation settings
 		new Setting(containerEl)
 			.setName(i18n.t('settings.defaultCreationVault.name'))
 			.setDesc(i18n.t('settings.defaultCreationVault.desc'))
@@ -4698,10 +4632,10 @@ class FolderBridgeSettingTab extends PluginSettingTab {
 									? parsed
 									: (parsed as Record<string, unknown>).mountPoints;
 								const mounts = Array.isArray(parsedMounts) ? parsedMounts as MountPoint[] : [];
-							if (!Array.isArray(mounts) || mounts.length === 0) {
-								new Notice(i18n.t('import.noMounts'));
-								return;
-							}
+								if (!Array.isArray(mounts) || mounts.length === 0) {
+									new Notice(i18n.t('import.noMounts'));
+									return;
+								}
 
 								let added = 0, skipped = 0;
 								for (const m of mounts) {
