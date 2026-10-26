@@ -1809,6 +1809,18 @@ export default class FolderBridgePlugin extends Plugin {
 				const existing = this.app.vault.getAbstractFileByPath(oldPath);
 				if (!existing) return;
 				await (vault.onChange as (event: string, path: string, prev: unknown, stat: unknown) => Promise<void>)('rename', oldPath, newPath, null);
+			},
+			// onRenameMountFile: called after a file is renamed in a mount.
+			// Opens the renamed file in the editor to match the behavior of file creation.
+			async (oldPath: string, newPath: string) => {
+				const newFile = this.app.vault.getAbstractFileByPath(newPath);
+				if (newFile instanceof TFile) {
+					try {
+						await this.app.workspace.openLinkText(newPath, newPath, 'split');
+					} catch {
+						// Best-effort: if the file is not yet registered or cannot be opened, ignore.
+					}
+				}
 			}
 		);
 

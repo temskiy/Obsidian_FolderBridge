@@ -86,6 +86,11 @@ export class VirtualAdapter {
 	 * can immediately update the in-memory vault tree.
 	 */
 	private onRename?: (oldPath: string, newPath: string) => Promise<void>;
+	/**
+	 * Called after a file is renamed in a mount so that the renamed file can be
+	 * automatically opened in the editor (matching the behavior of file creation).
+	 */
+	private onRenameMountFile?: (oldPath: string, newPath: string) => Promise<void>;
 
 	constructor(
 		original: unknown,
@@ -98,7 +103,8 @@ export class VirtualAdapter {
 		isIgnored: (name: string, mount: MountPoint, mountRelativePath?: string) => boolean,
 		onModify?: (normalizedPath: string) => Promise<void>,
 		onDelete?: (normalizedPath: string) => Promise<void>,
-		onRename?: (oldPath: string, newPath: string) => Promise<void>
+		onRename?: (oldPath: string, newPath: string) => Promise<void>,
+		onRenameMountFile?: (normalizedPath: string, newNormalizedPath: string) => Promise<void>
 	) {
 		this.original = original;
 		this.pathMapper = pathMapper;
@@ -111,6 +117,7 @@ export class VirtualAdapter {
 		this.onModify = onModify;
 		this.onDelete = onDelete;
 		this.onRename = onRename;
+		this.onRenameMountFile = onRenameMountFile;
 	}
 
 	private async notifyDelete(normalizedPath: string): Promise<void> {
@@ -2157,6 +2164,7 @@ export class VirtualAdapter {
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (webdav) ${this.toServerPath(normalizedPath, mount)} → ${this.toServerPath(newNormalizedPath, mount)}`); return; }
 			await webdavRN.rename(this.toServerPath(normalizedPath, mount), this.toServerPath(newNormalizedPath, mount));
 			await this.notifyRename(normalizedPath, newNormalizedPath);
+			await this.onRenameMountFile?.(normalizedPath, newNormalizedPath);
 			return;
 		}
 		const s3RN = this.getS3(mount);
@@ -2164,6 +2172,7 @@ export class VirtualAdapter {
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (s3) ${this.toServerPath(normalizedPath, mount)} → ${this.toServerPath(newNormalizedPath, mount)}`); return; }
 			await s3RN.rename(this.toServerPath(normalizedPath, mount), this.toServerPath(newNormalizedPath, mount));
 			await this.notifyRename(normalizedPath, newNormalizedPath);
+			await this.onRenameMountFile?.(normalizedPath, newNormalizedPath);
 			return;
 		}
 		const sftpRN = this.getSFTP(mount);
@@ -2171,6 +2180,7 @@ export class VirtualAdapter {
 			if (this.dryRun) { logger.debug(`[FolderBridge DryRun] rename (sftp) ${this.toServerPath(normalizedPath, mount)} → ${this.toServerPath(newNormalizedPath, mount)}`); return; }
 			await sftpRN.rename(this.toServerPath(normalizedPath, mount), this.toServerPath(newNormalizedPath, mount));
 			await this.notifyRename(normalizedPath, newNormalizedPath);
+			await this.onRenameMountFile?.(normalizedPath, newNormalizedPath);
 			return;
 		}
 		// Local mount
@@ -2220,6 +2230,8 @@ export class VirtualAdapter {
 
 		try {
 			await fs.promises.rename(srcReal, dstReal);
+			await this.notifyRename(normalizedPath, newNormalizedPath);
+			await this.onRenameMountFile?.(normalizedPath, newNormalizedPath);
 		} catch (e) {
 			const err = e as NodeJS.ErrnoException;
 			if (err.code === 'EXDEV') {
