@@ -1813,7 +1813,7 @@ export default class FolderBridgePlugin extends Plugin {
 			// 'create' event which fires when the new file appears in the vault tree.
 			// Uses this.registerEvent() to prevent memory leaks when the plugin is disabled.
 			async (oldPath: string, newPath: string) => {
-				// Subscribe to 'create' event
+				// Subscribe to 'create' event — only for files, not folders
 				const onCreate = (file: TAbstractFile) => {
 					if (file instanceof TFile && file.path === newPath) {
 						// Remove subscription after handling — we only need it once per rename
@@ -1827,9 +1827,10 @@ export default class FolderBridgePlugin extends Plugin {
 
 				// Fallback: if the create event already fired before we subscribed,
 				// try to open the file directly after a short delay.
+				// Only open if it's actually a file, not a folder.
 				setTimeout(() => {
-					const file = this.app.vault.getAbstractFileByPath(newPath) as TFile | null;
-					if (file) {
+					const abstractFile = this.app.vault.getAbstractFileByPath(newPath);
+					if (abstractFile instanceof TFile) {
 						this.app.workspace.openLinkText(newPath, newPath, 'tab').catch(() => {
 							// Best-effort: if the file cannot be opened, ignore.
 						});
