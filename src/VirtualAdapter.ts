@@ -979,13 +979,13 @@ export class VirtualAdapter {
 		try {
 			entries = await fs.promises.readdir(realDirPath, { withFileTypes: true });
 		} catch (e: any) {
-			// [CLEANUP] Ожидаемо для слоёных хранилищ: папка есть в основном хранилище,
-			// но физически отсутствует в этом конкретном маунте.
+			// [CLEANUP] Expected for layered vaults: folder exists in the primary vault,
+			// but is physically absent from this specific mount.
 			if (e?.code === 'ENOENT' || String(e).includes('ENOENT')) {
 				logger.debug(`[FolderBridge] Directory not found in mount (expected in layered vaults): "${realDirPath}"`);
 				return { files: [], folders: [] };
 			}
-			// Реальные ошибки (например, отказ в доступе) по-прежнему логируются как error.
+			// Real errors (e.g., access denied) are still logged as error.
 			const msg = translateFsError(e as NodeJS.ErrnoException, 'list');
 			logger.error(`[FolderBridge] Failed to list directory "${realDirPath}":`, msg);
 			throw new Error(`Folder Bridge: Cannot list "${realDirPath}": ${msg}`);

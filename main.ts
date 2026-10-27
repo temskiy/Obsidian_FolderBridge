@@ -1897,16 +1897,16 @@ export default class FolderBridgePlugin extends Plugin {
 				}
 
 				if (existsInMount) {
-					// Файл реально есть в маунте, используем его
+					// File actually exists in the mount, use its path
 					return this.virtualAdapter?.resolveResourceUrl(mountRealPath)
 						?? tryReadAsDataUri(mountRealPath, (this.settings.maxDataUriMB ?? 10) * 1024 * 1024)
 						?? realPathToResourceUrl(mountRealPath);
 				}
 
-				// [CRITICAL FIX] Файла НЕТ в маунте. Он принадлежит основному хранилищу.
-				// Не используем originalVaultGetResourcePath, так как кэш Obsidian может 
-				// ошибочно связывать этот file.path с маунтом. Вместо этого явно вычисляем 
-				// локальный путь и генерируем URL из него.
+				// [CRITICAL FIX] File does NOT exist in the mount. It belongs to the primary vault.
+				// Do not use originalVaultGetResourcePath, as Obsidian's cache may
+				// incorrectly associate this file.path with the mount. Instead, explicitly compute
+				// the local path and generate the URL from it.
 				logger.debug(`[FolderBridge] getResourcePath() forcing local vault path for: "${file.path}"`);
 				const adapter = this.app.vault.adapter as any;
 				const basePath = typeof adapter.getBasePath === 'function' ? adapter.getBasePath() : '';
@@ -1917,7 +1917,7 @@ export default class FolderBridgePlugin extends Plugin {
 					?? realPathToResourceUrl(localRealPath);
 			}
 
-			// Fallback для файлов, которые вообще не подпадают под маунты
+			// Fallback for files that don't match any mounts at all
 			if (typeof this.originalVaultGetResourcePath === 'function') {
 				return (this.originalVaultGetResourcePath as (file: TFile) => string)(file);
 			}
@@ -3556,14 +3556,14 @@ export default class FolderBridgePlugin extends Plugin {
 		const notice = new Notice(i18n.t('status.removing', { path: mount.virtualPath }), 0);
 		let removedCount = 0;
 
-		// [SMART FIX] Получаем доступ к оригинальному адаптеру основного хранилища
+		// [SMART FIX] Get access to the original adapter of the primary vault
 		const origAdapter = (this.app.vault.adapter as any).orig?.() || (this as any).originalAdapter;
 
 		const collectAndRemove = async (folder: TFolder): Promise<void> => {
 			for (const child of [...folder.children]) {
 				if (!isCurrent()) return;
 
-				// Проверяем, существует ли этот файл/папка в ОСНОВНОМ хранилище
+				// Check if this file/folder exists in the PRIMARY vault
 				let existsInPrimary = false;
 				try {
 					existsInPrimary = await origAdapter.exists(child.path);
@@ -3572,10 +3572,11 @@ export default class FolderBridgePlugin extends Plugin {
 				}
 
 				if (!existsInPrimary) {
-					// Файла нет в основном хранилище, значит он добавлен маунтом. Безопасно удаляем из индекса.
+					// File does not exist in the primary vault, so it was added by a mount.
+					// Safely remove from the index.
 					try {
 						if (child instanceof TFolder) {
-							await collectAndRemove(child); // Сначала рекурсивно чистим содержимое
+							await collectAndRemove(child); // First recursively clean contents
 							await vault.onChange('folder-removed', child.path, null, null);
 						} else {
 							await vault.onChange('file-removed', child.path, null, null);
@@ -3585,8 +3586,8 @@ export default class FolderBridgePlugin extends Plugin {
 						logger.debug('Folder Bridge: Failed to remove item from vault view', e);
 					}
 				} else if (child instanceof TFolder) {
-					// Файл/папка есть в основном хранилище, не удаляем её.
-					// Но рекурсивно проверяем её содержимое, вдруг там есть файлы только из маунта.
+					// File/folder exists in the primary vault, don't remove it.
+					// But recursively check its contents in case they're only from mounts.
 					await collectAndRemove(child);
 				}
 			}
