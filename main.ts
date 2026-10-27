@@ -1811,16 +1811,33 @@ export default class FolderBridgePlugin extends Plugin {
 				await (vault.onChange as (event: string, path: string, prev: unknown, stat: unknown) => Promise<void>)('rename', oldPath, newPath, null);
 			},
 			// onRenameMountFile: called after a file is renamed in a mount.
-			// Opens the renamed file in the editor to match the behavior of file creation.
+			// Because mounts may not support native rename operations, the plugin
+			// performs rename as delete + create. Therefore we subscribe to the
+			// 'create' event which fires when the new file appears in the vault tree.
+			// Uses this.registerEvent() to prevent memory leaks when the plugin is disabled.
 			async (oldPath: string, newPath: string) => {
-				const newFile = this.app.vault.getAbstractFileByPath(newPath);
-				if (newFile instanceof TFile) {
-					try {
-						await this.app.workspace.openLinkText(newPath, newPath, 'split');
-					} catch {
-						// Best-effort: if the file is not yet registered or cannot be opened, ignore.
+				// Subscribe to 'create' event
+				const onCreate = (file: TAbstractFile) => {
+					if (file instanceof TFile && file.path === newPath) {
+						// Remove subscription after handling — we only need it once per rename
+						this.app.vault.off('create', onCreate);
+						this.app.workspace.openLinkText(newPath, newPath, 'tab').catch(() => {
+							// Best-effort: if the file cannot be opened, ignore.
+						});
 					}
-				}
+				};
+				this.registerEvent(this.app.vault.on('create', onCreate));
+
+				// Fallback: if the create event already fired before we subscribed,
+				// try to open the file directly after a short delay.
+				setTimeout(() => {
+					const file = this.app.vault.getAbstractFileByPath(newPath) as TFile | null;
+					if (file) {
+						this.app.workspace.openLinkText(newPath, newPath, 'tab').catch(() => {
+							// Best-effort: if the file cannot be opened, ignore.
+						});
+					}
+				}, 100);
 			}
 		);
 

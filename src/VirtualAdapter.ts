@@ -499,7 +499,6 @@ export class VirtualAdapter {
 
 	async exists(normalizedPath: string, sensitive?: boolean): Promise<boolean> {
 		if (this.isVaultInternalPath(normalizedPath)) {
-			logger.debug(`[FolderBridge EXISTS] path="${normalizedPath}" → delegating to original adapter (internal path)`);
 			return this.orig().exists(normalizedPath, sensitive);
 		}
 
@@ -526,7 +525,6 @@ export class VirtualAdapter {
 
 	async stat(normalizedPath: string): Promise<{ type: 'file' | 'folder'; ctime: number; mtime: number; size: number } | null> {
 		if (this.isVaultInternalPath(normalizedPath)) {
-			logger.debug(`[FolderBridge STAT] path="${normalizedPath}" → delegating to original adapter (internal path)`);
 			return this.orig().stat(normalizedPath);
 		}
 
