@@ -708,7 +708,7 @@ export default class FolderBridgePlugin extends Plugin {
 
 		// ── Tag-based mount/unmount commands ─────────────────────────────────
 		// Dynamically register commands for each unique tag found in mountPoints.
-		// Commands are named with # prefix (e.g. "#work mount/unmount") to distinguish
+		// Commands are named with # prefix to distinguish
 		// from individual mount commands.
 		this.refreshTagCommands();
 
@@ -1660,16 +1660,13 @@ export default class FolderBridgePlugin extends Plugin {
 
 	/**
 	 * Returns true when `name` (the leaf filename/dirname) or `mountRelativePath`
-	 * (the path relative to the mount root, e.g. "assets/vendor/cache") should
+	 * (the path relative to the mount root) should
 	 * be excluded from the vault view and file watcher.
 	 *
 	 * Pattern types in ignoreList:
 	 *   - No slash, no wildcard  → matched against the leaf name only
-	 *     (e.g. ".git", "node_modules")
 	 *   - Contains "/"           → matched as a prefix against mountRelativePath
-	 *     (e.g. "assets/vendor" ignores that subtree and nothing else named "assets")
 	 *   - Contains "*"           → treated as a glob matched against the leaf name
-	 *     (e.g. "*.tmp", "~$*")
 	 */
 	isNameIgnored(name: string, mount: MountPoint, mountRelativePath?: string): boolean {
 		const cache = this.ignoreCache.get(mount.id);
@@ -2629,7 +2626,6 @@ export default class FolderBridgePlugin extends Plugin {
 	/**
 	 * Build the destination virtual path preserving the source path structure.
 	 * Preserves the full path from vault root, prepended with destination mount.
-	 * E.g. "Хранилище 0/файл.pdf" → "_12/Хранилище 0/файл.pdf"
 	 */
 	private async buildDestinationVirtualPath(
 		file: TAbstractFile,
@@ -3450,7 +3446,6 @@ export default class FolderBridgePlugin extends Plugin {
 		}
 
 		// Walk every path segment so intermediate virtual folders also appear
-		// (e.g. mounting "Projects/Work" also surfaces the "Projects" folder).
 		const segments = normalizePath(mount.virtualPath).split('/');
 		for (let i = 1; i <= segments.length; i++) {
 			if (!isCurrent()) return;
